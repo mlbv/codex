@@ -2739,8 +2739,14 @@ async fn try_run_sampling_request(
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
     let mut response_completed = false;
     let mut request_token_usage = None;
-    sess.set_server_reasoning_included(step_context.settings.model_info.use_responses_lite)
-        .await;
+    sess.set_server_reasoning_included(
+        step_context
+            .settings
+            .model_info
+            .use_responses_lite
+            .then_some(true),
+    )
+    .await;
     let mut stream = match client_session
         .stream(
             prompt,
@@ -3176,7 +3182,7 @@ async fn try_run_sampling_request(
                 .await;
             }
             ResponseEvent::ServerReasoningIncluded(included) => {
-                sess.set_server_reasoning_included(included).await;
+                sess.set_server_reasoning_included(Some(included)).await;
             }
             ResponseEvent::RateLimits(snapshot) => {
                 // Update internal state with latest rate limits, but defer sending until

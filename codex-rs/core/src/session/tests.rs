@@ -3345,6 +3345,90 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
 }
 
 #[tokio::test]
+async fn token_usage_reasoning_coverage_missing_metadata_does_not_trigger_auto_compaction() {
+    let (session, turn_context, _events) = make_session_and_context_with_auth_and_config_and_rx(
+        codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        Vec::new(),
+        |config| {
+            config.model = Some("gpt-5.2".to_string());
+            config.model_context_window = Some(1_000);
+            config.model_auto_compact_token_limit = Some(800);
+        },
+    )
+    .await;
+    let reasoning = serde_json::from_value(serde_json::json!({
+        "type": "reasoning",
+        "summary": [],
+        "encrypted_content": "a".repeat(4_000),
+    }))
+    .unwrap();
+    session
+        .replace_history(
+            vec![
+                user_message("first"),
+                reasoning,
+                assistant_message("first answer"),
+            ],
+            /*reference_context_item*/ None,
+        )
+        .await;
+    session
+        .update_token_usage_info(
+            &turn_context,
+            Some(&TokenUsage {
+                total_tokens: 590,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    // A new turn clears coverage; a response without metadata must not imply exclusion.
+    session.set_server_reasoning_included(None).await;
+    session
+        .record_conversation_items(
+            &turn_context,
+            turn_context.model_info(),
+            &[user_message("second")],
+        )
+        .await;
+
+    let status = super::context_window::context_window_token_status(&session, &turn_context).await;
+    assert!(status.active_context_tokens >= 590);
+    assert!(!status.token_limit_reached);
+    assert!(!status.full_context_window_limit_reached);
+
+    session
+        .record_conversation_items(
+            &turn_context,
+            turn_context.model_info(),
+            &[assistant_message("second answer")],
+        )
+        .await;
+
+    // Fresh server usage controls compaction even when coverage metadata stays absent.
+    for (total_tokens, token_limit_reached) in [(600, false), (810, true)] {
+        session
+            .update_token_usage_info(
+                &turn_context,
+                Some(&TokenUsage {
+                    total_tokens,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+
+        let status =
+            super::context_window::context_window_token_status(&session, &turn_context).await;
+        assert_eq!(status.active_context_tokens, total_tokens);
+        assert_eq!(status.auto_compact_scope_limit, Some(800));
+        assert_eq!(status.token_limit_reached, token_limit_reached);
+        assert!(!status.full_context_window_limit_reached);
+    }
+}
+
+#[tokio::test]
 async fn record_initial_history_seeds_token_info_from_rollout() {
     let (session, turn_context) = make_session_and_context().await;
     let (mut rollout_items, _expected) = sample_rollout(&session, &turn_context).await;
@@ -3394,24 +3478,31 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
 
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
+            accounting: None,
             info: Some(info1),
             rate_limits: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
+            accounting: None,
             info: None,
             rate_limits: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
+            accounting: Some(codex_protocol::protocol::TokenUsageAccounting {
+                non_last_reasoning_tokens: 13,
+                history_baseline_len: 0,
+            }),
             info: Some(info2.clone()),
             rate_limits: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
+            accounting: None,
             info: None,
             rate_limits: None,
         },
@@ -3428,6 +3519,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
 
     let actual = session.state.lock().await.token_info();
     assert_eq!(actual, Some(info2));
+    assert_eq!(session.get_total_token_usage().await, 48);
 }
 
 #[test]

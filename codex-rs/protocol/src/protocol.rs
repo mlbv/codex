@@ -2494,6 +2494,19 @@ impl TokenUsageInfo {
 pub struct TokenCountEvent {
     pub info: Option<TokenUsageInfo>,
     pub rate_limits: Option<RateLimitSnapshot>,
+    /// Local rollout accounting; never part of the client event payload.
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub accounting: Option<TokenUsageAccounting>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TokenUsageAccounting {
+    /// Discard older supplements that inferred exclusion from missing server metadata.
+    #[serde(default, rename = "confirmed_excluded_reasoning_tokens")]
+    pub non_last_reasoning_tokens: i64,
+    pub history_baseline_len: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]

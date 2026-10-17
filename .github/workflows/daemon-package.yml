@@ -1,0 +1,208 @@
+name: Build upstream-release daemon with direct fixes
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published upstream release tag; leave empty for the latest stable release
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daemon-package-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM_TAG: ${{ inputs.tag }}
+      # Use non-LTO release builds by default.
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_INCREMENTAL: "0"
+      DAEMON_TARGET_CACHE_MAX_BYTES: "2147483648"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # Keep the cache server alive during long Rust compilations.
+      SCCACHE_IDLE_TIMEOUT: "0"
+      SCCACHE_LOG: info
+      SCCACHE_ERROR_LOG: ${{ github.workspace }}/artifacts/sccache.log
+      LIBSQLITE3_FLAGS: SQLITE_DISABLE_INTRINSIC
+      RUST_MIN_STACK: "8388608"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Check daemon build tooling
+        run: python -B -m unittest discover -s scripts -p 'test_daemon_*.py' -v
+
+      - name: Resolve published upstream release
+        id: release
+        run: python scripts/daemon_release.py resolve --output artifacts
+
+      - name: Check out exact official source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: openai/codex
+          ref: ${{ steps.release.outputs.commit }}
+          path: source
+          persist-credentials: false
+
+      - name: Configure cache paths and namespace
+        id: cache_config
+        shell: pwsh
+        run: |
+          # These procedural-macro inputs are not necessarily tracked by rustc.
+          @'
+          import hashlib
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+
+          embedded = subprocess.check_output([
+              "git", "-C", "source", "ls-files", "--stage", "-z", "--",
+              "codex-rs/skills/src/assets", ":(glob)codex-rs/state/*migrations/**",
+          ])
+          namespace = "daemon-windows-2025-x64-nolto-v1-" + hashlib.sha256(embedded).hexdigest()
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as stream:
+              print("SCCACHE_GHA_VERSION=" + namespace, file=stream)
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+              print("v8-cache=" + str(Path(tempfile.gettempdir()) / "codex-package"), file=stream)
+          '@ | python -
+
+      - name: Restore Cargo and V8 downloads
+        id: download_cache
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${{ steps.cache_config.outputs.v8-cache }}
+          key: daemon-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/codex-rs/Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            daemon-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/codex-rs/Cargo.lock') }}-
+            daemon-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Configure MSVC
+        uses: ./source/.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Install the upstream Rust toolchain
+        shell: pwsh
+        run: |
+          $channel = python -c "import tomllib; print(tomllib.load(open('source/codex-rs/rust-toolchain.toml', 'rb'))['toolchain']['channel'])"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup toolchain install $channel --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install wire comparison dependency
+        run: python -m pip install websockets==15.0.1
+
+      - name: Set up standard Windows user for daemon fixtures
+        shell: pwsh
+        run: ./scripts/setup_daemon_parity_user.ps1
+
+      - name: Integrate daemon source changes and audit source
+        run: python scripts/daemon_release.py prepare --source source --output artifacts
+
+      - name: Check official HTTP and WebSocket fixtures before compilation
+        run: python scripts/daemon_release.py preflight --source source --output artifacts
+
+      - name: Configure Cargo output cache
+        id: target_config
+        run: python scripts/daemon_build_metrics.py configure --source source --output artifacts
+
+      - name: Restore Cargo output cache
+        id: target_cache
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ steps.target_config.outputs.path }}
+          key: ${{ steps.target_config.outputs.key }}
+
+      - name: Restore cached Cargo profiles
+        if: steps.target_cache.outputs.cache-hit == 'true'
+        run: python scripts/daemon_build_metrics.py restore --source source --output artifacts
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - name: Start compiler cache statistics
+        run: sccache --start-server
+
+      - name: Compile and run focused tests with upstream ci-test profile
+        run: python scripts/daemon_release.py test --source source --output artifacts
+
+      - name: Build non-LTO release package
+        id: release_build
+        run: python scripts/daemon_release.py build --source source --output artifacts
+
+      - name: Prepare bounded Cargo output cache
+        id: target_snapshot
+        if: ${{ !cancelled() && steps.release_build.outcome == 'success' && steps.target_cache.outputs.cache-hit != 'true' }}
+        run: python scripts/daemon_build_metrics.py snapshot --source source --output artifacts
+
+      - name: Save bounded Cargo output cache
+        if: ${{ !cancelled() && steps.target_snapshot.outputs.cacheable == 'true' }}
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ steps.target_config.outputs.path }}
+          key: ${{ steps.target_config.outputs.key }}
+
+      - name: Save Cargo and V8 downloads
+        if: ${{ !cancelled() && steps.download_cache.outputs.cache-primary-key != '' && steps.download_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${{ steps.cache_config.outputs.v8-cache }}
+          key: ${{ steps.download_cache.outputs.cache-primary-key }}
+
+      - name: Compare official and patched daemon requests
+        run: python scripts/daemon_release.py verify --source source --output artifacts
+
+      - name: Upload verified package
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-${{ steps.release.outputs.version }}-windows-daemon
+          path: artifacts/package/
+          if-no-files-found: error
+
+      - name: Measure final Cargo outputs
+        if: always()
+        run: python scripts/daemon_build_metrics.py measure --source source --output artifacts
+
+      - name: Upload audit and validation evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: daemon-build-evidence
+          path: |
+            artifacts/*.json
+            artifacts/*.jsonl
+            artifacts/*.log
+            artifacts/*.diff
+            artifacts/timings/*.html
+            artifacts/parity/*.json
+            artifacts/parity/*.log
+          if-no-files-found: warn
