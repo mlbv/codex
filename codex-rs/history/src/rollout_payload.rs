@@ -19,6 +19,7 @@ use crate::RetainedUserMessage;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::protocol::TokenUsageAccounting;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -65,6 +66,9 @@ pub(super) enum RolloutItemWire<'a> {
     },
     EventMsg {
         payload: Cow<'a, EventMsg>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[schemars(skip)]
+        accounting: Option<Cow<'a, TokenUsageAccounting>>,
     },
     RealtimeItem {
         payload: Cow<'a, RealtimeItem>,
@@ -155,6 +159,10 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
             },
             RolloutItem::EventMsg(payload) => Self::EventMsg {
                 payload: Cow::Borrowed(payload),
+                accounting: match payload {
+                    EventMsg::TokenCount(event) => event.accounting.as_ref().map(Cow::Borrowed),
+                    _ => None,
+                },
             },
             RolloutItem::RealtimeItem(payload) => Self::RealtimeItem {
                 payload: Cow::Borrowed(payload),
@@ -234,7 +242,21 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
             RolloutItemWire::SecurityRiskScore { payload } => {
                 Self::SecurityRiskScore(payload.into_owned())
             }
-            RolloutItemWire::EventMsg { payload } => Self::EventMsg(payload.into_owned()),
+            RolloutItemWire::EventMsg {
+                payload,
+                accounting,
+            } => {
+                let mut payload = payload.into_owned();
+                if let EventMsg::TokenCount(event) = &mut payload {
+                    event.accounting = accounting.map(Cow::into_owned);
+                } else {
+                    assert!(
+                        accounting.is_none(),
+                        "accounting belongs to token-count records"
+                    );
+                }
+                Self::EventMsg(payload)
+            }
             RolloutItemWire::RealtimeItem { payload } => Self::RealtimeItem(payload.into_owned()),
         }
     }

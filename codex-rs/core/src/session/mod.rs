@@ -1560,7 +1560,7 @@ impl Session {
 
     pub(crate) async fn get_total_token_usage(&self) -> i64 {
         let state = self.state.lock().await;
-        state.get_total_token_usage(state.server_reasoning_included())
+        state.get_total_token_usage()
     }
 
     pub(crate) async fn auto_compact_window_snapshot(&self) -> AutoCompactWindowSnapshot {
@@ -1719,10 +1719,7 @@ impl Session {
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
-                    let mut state = self.state.lock().await;
-                    state.set_token_info(Some(info));
-                }
+                self.restore_token_usage_from_rollout(&rollout_items).await;
                 self.state.lock().await.latest_token_usage_record =
                     Self::last_token_usage_record_from_rollout(&rollout_items);
 
@@ -1747,10 +1744,7 @@ impl Session {
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
-                    let mut state = self.state.lock().await;
-                    state.set_token_info(Some(info));
-                }
+                self.restore_token_usage_from_rollout(&rollout_items).await;
                 self.state.lock().await.latest_token_usage_record =
                     Self::last_token_usage_record_from_rollout(&rollout_items);
 
@@ -1938,11 +1932,30 @@ impl Session {
         state.set_auto_compact_window_estimated_prefill(tokens);
     }
 
-    fn last_token_info_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenUsageInfo> {
-        rollout_items.iter().rev().find_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
-            _ => None,
-        })
+    async fn restore_token_usage_from_rollout(&self, rollout_items: &[RolloutItem]) {
+        let mut history_replaced = false;
+        for item in rollout_items.iter().rev() {
+            match item {
+                RolloutItem::Compacted(_)
+                | RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)) => history_replaced = true,
+                RolloutItem::EventMsg(EventMsg::TokenCount(event))
+                    if event.info.is_some() || event.accounting.is_some() =>
+                {
+                    let accounting = if history_replaced {
+                        None
+                    } else {
+                        event.accounting
+                    };
+                    self.state
+                        .lock()
+                        .await
+                        .history
+                        .restore_token_info(event.info.clone(), accounting);
+                    return;
+                }
+                _ => {}
+            }
+        }
     }
 
     fn last_token_usage_record_from_rollout(
@@ -5230,29 +5243,7 @@ impl Session {
         };
         {
             let mut state = self.state.lock().await;
-            let mut info = state.token_info().unwrap_or(TokenUsageInfo {
-                total_token_usage: TokenUsage::default(),
-                last_token_usage: TokenUsage::default(),
-                model_context_window: None,
-            });
-
-            info.last_token_usage = TokenUsage {
-                input_tokens: 0,
-                cached_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 0,
-                reasoning_output_tokens: 0,
-                total_tokens: estimated_total_tokens.max(0),
-                codex_rollout_budget_units: None,
-            };
-
-            if let Some(model_context_window) = turn_context.model_context_window() {
-                info.model_context_window = Some(model_context_window);
-            }
-
-            state.set_token_info(Some(info));
-            // The local estimate already includes every retained reasoning item.
-            state.set_server_reasoning_included(/*included*/ true);
+            state.set_token_estimate(estimated_total_tokens, turn_context.model_context_window());
         }
         self.set_auto_compact_window_estimated_prefill_for_scope(
             turn_context,
@@ -5291,17 +5282,26 @@ impl Session {
         state.record_mcp_dependency_prompted(names);
     }
 
-    pub(crate) async fn set_server_reasoning_included(&self, included: bool) {
+    pub(crate) async fn set_server_reasoning_included(&self, included: Option<bool>) {
         let mut state = self.state.lock().await;
         state.set_server_reasoning_included(included);
     }
 
     pub(crate) async fn send_token_count_event(&self, turn_context: &TurnContext) {
-        let (info, rate_limits) = {
+        let (info, rate_limits, accounting) = {
             let state = self.state.lock().await;
-            state.token_info_and_rate_limits()
+            let (info, rate_limits) = state.token_info_and_rate_limits();
+            (
+                info,
+                rate_limits,
+                Some(state.history.token_usage_accounting()),
+            )
         };
-        let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
+        let event = EventMsg::TokenCount(TokenCountEvent {
+            info,
+            rate_limits,
+            accounting,
+        });
         self.send_event(turn_context, event).await;
     }
 

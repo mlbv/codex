@@ -36,6 +36,7 @@ impl Session {
             TokenCountEvent {
                 info: history.token_info(),
                 rate_limits: None,
+                accounting: Some(history.token_usage_accounting()),
             },
         )));
         items
