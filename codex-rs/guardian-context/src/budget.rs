@@ -144,6 +144,9 @@ impl SectionCost {
                 // payload conservatively until its consumer supplies modality costs.
                 self.text_bytes = self.text_bytes.saturating_add(audio_url.len());
             }
+            ContentItem::InputFile { file } => {
+                self.text_bytes = self.text_bytes.saturating_add(file.payload_len());
+            }
         }
         self
     }

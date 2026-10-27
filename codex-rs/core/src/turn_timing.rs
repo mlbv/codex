@@ -401,7 +401,9 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
         | ResponseEvent::SafetyBuffering(_)
         | ResponseEvent::ServerReasoningIncluded(_)
         | ResponseEvent::ToolCallInputDelta { .. }
+        | ResponseEvent::FunctionCallArgumentsDelta { .. }
         | ResponseEvent::Completed { .. }
+        | ResponseEvent::Incomplete { .. }
         | ResponseEvent::ReasoningSummaryPartAdded { .. }
         | ResponseEvent::RateLimits(_)
         | ResponseEvent::ModelsEtag(_) => false,

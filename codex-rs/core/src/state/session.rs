@@ -77,7 +77,7 @@ pub(crate) struct SessionState {
     pub(crate) history_reset: CancellationToken,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
-    pub(crate) server_reasoning_included: bool,
+    pub(crate) server_reasoning_included: Option<bool>,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
     pub(crate) additional_context: AdditionalContextStore,
     /// Settings used by the latest regular user turn, used for turn-to-turn
@@ -131,7 +131,7 @@ impl SessionState {
             history_reset: CancellationToken::new(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
-            server_reasoning_included: false,
+            server_reasoning_included: None,
             mcp_dependency_prompted: HashSet::new(),
             additional_context: AdditionalContextStore::default(),
             previous_turn_settings: None,
@@ -225,6 +225,11 @@ impl SessionState {
         self.history.set_token_info(info);
     }
 
+    pub(crate) fn set_token_estimate(&mut self, tokens: i64, model_context_window: Option<i64>) {
+        self.history
+            .set_token_estimate(tokens, model_context_window);
+    }
+
     pub(crate) fn record_token_usage(
         &mut self,
         thread_id: ThreadId,
@@ -292,7 +297,8 @@ impl SessionState {
         usage: &TokenUsage,
         model_context_window: Option<i64>,
     ) {
-        self.history.update_token_info(usage, model_context_window);
+        self.history
+            .update_token_info(usage, model_context_window, self.server_reasoning_included);
     }
 
     pub(crate) fn ensure_auto_compact_window_server_prefill_from_usage(
@@ -374,17 +380,12 @@ impl SessionState {
         self.history.set_token_usage_full(context_window);
     }
 
-    pub(crate) fn get_total_token_usage(&self, server_reasoning_included: bool) -> i64 {
-        self.history
-            .get_total_token_usage(server_reasoning_included)
+    pub(crate) fn get_total_token_usage(&self) -> i64 {
+        self.history.get_total_token_usage()
     }
 
-    pub(crate) fn set_server_reasoning_included(&mut self, included: bool) {
+    pub(crate) fn set_server_reasoning_included(&mut self, included: Option<bool>) {
         self.server_reasoning_included = included;
-    }
-
-    pub(crate) fn server_reasoning_included(&self) -> bool {
-        self.server_reasoning_included
     }
 
     pub(crate) fn record_mcp_dependency_prompted<I>(&mut self, names: I)

@@ -114,6 +114,7 @@ pub fn formatted_truncate_text_content_items_with_policy(
             FunctionCallOutputContentItem::InputText { text } => Some(text.as_str()),
             FunctionCallOutputContentItem::InputImage { .. }
             | FunctionCallOutputContentItem::InputAudio { .. }
+            | FunctionCallOutputContentItem::InputFile { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
         })
         .collect::<Vec<_>>();
@@ -150,6 +151,9 @@ pub fn formatted_truncate_text_content_items_with_policy(
                 audio_url: audio_url.clone(),
             })
         }
+        FunctionCallOutputContentItem::InputFile { file } => {
+            Some(FunctionCallOutputContentItem::InputFile { file: file.clone() })
+        }
         FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
             Some(FunctionCallOutputContentItem::EncryptedContent {
                 encrypted_content: encrypted_content.clone(),
@@ -173,6 +177,7 @@ pub fn truncate_function_output_items_with_policy(
     };
     let mut omitted_text_items = 0usize;
     let mut omitted_audio_items = 0usize;
+    let mut omitted_file_items = 0usize;
 
     for item in items {
         match item {
@@ -229,6 +234,20 @@ pub fn truncate_function_output_items_with_policy(
                     omitted_audio_items += 1;
                 }
             }
+            FunctionCallOutputContentItem::InputFile { file } => {
+                let token_cost = usize::try_from(approx_tokens_from_byte_count(file.payload_len()))
+                    .unwrap_or(usize::MAX);
+                let cost = match policy {
+                    TruncationPolicy::Bytes(_) => file.payload_len(),
+                    TruncationPolicy::Tokens(_) => token_cost,
+                };
+                if cost <= remaining_budget {
+                    out.push(FunctionCallOutputContentItem::InputFile { file: file.clone() });
+                    remaining_budget = remaining_budget.saturating_sub(cost);
+                } else {
+                    omitted_file_items += 1;
+                }
+            }
             FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
                 out.push(FunctionCallOutputContentItem::EncryptedContent {
                     encrypted_content: encrypted_content.clone(),
@@ -245,6 +264,11 @@ pub fn truncate_function_output_items_with_policy(
     if omitted_audio_items > 0 {
         out.push(FunctionCallOutputContentItem::InputText {
             text: format!("[omitted {omitted_audio_items} audio items ...]"),
+        });
+    }
+    if omitted_file_items > 0 {
+        out.push(FunctionCallOutputContentItem::InputText {
+            text: format!("[omitted {omitted_file_items} file items ...]"),
         });
     }
 

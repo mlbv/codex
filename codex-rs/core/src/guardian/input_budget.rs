@@ -307,7 +307,9 @@ pub(crate) async fn finalize(
                                     image: image.clone(),
                                     detail: *detail,
                                 }),
-                                ContentItem::OutputText { .. } | ContentItem::InputAudio { .. } => {
+                                ContentItem::OutputText { .. }
+                                | ContentItem::InputAudio { .. }
+                                | ContentItem::InputFile { .. } => {
                                     Err(CodexErr::InvalidRequest(
                                         "Unsupported Guardian input content".to_owned(),
                                     ))

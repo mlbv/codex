@@ -264,6 +264,7 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
                 FunctionCallOutputContentItem::InputText { .. }
                 | FunctionCallOutputContentItem::InputImage { .. }
                 | FunctionCallOutputContentItem::InputAudio { .. }
+                | FunctionCallOutputContentItem::InputFile { .. }
                 | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
             })
             .collect::<Vec<_>>()

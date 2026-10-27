@@ -229,19 +229,7 @@ impl ToolSearchHandler {
             }
         };
 
-        let query = args.query.trim();
-        if query.is_empty() {
-            return Err(FunctionCallError::RespondToModel(
-                "query must not be empty".to_string(),
-            ));
-        }
-        let limit = args.limit.unwrap_or(TOOL_SEARCH_DEFAULT_LIMIT);
-
-        if limit == 0 {
-            return Err(FunctionCallError::RespondToModel(
-                "limit must be greater than zero".to_string(),
-            ));
-        }
+        let (query, limit) = query_and_limit(&args)?;
 
         let model_messages = ResolvedModelMessages::from_model(&step_context.settings.model_info);
         let indirect_prefixes = IndirectNamespacePrefixes::new(
@@ -285,7 +273,51 @@ impl ToolSearchHandler {
 
 impl CoreToolRuntime for ToolSearchHandler {}
 
+fn query_and_limit(
+    args: &codex_protocol::models::SearchToolCallParams,
+) -> Result<(&str, usize), FunctionCallError> {
+    let query = args.query.trim();
+    if query.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "query must not be empty".to_string(),
+        ));
+    }
+    let limit = args.limit.unwrap_or(TOOL_SEARCH_DEFAULT_LIMIT);
+    if limit == 0 {
+        return Err(FunctionCallError::RespondToModel(
+            "limit must be greater than zero".to_string(),
+        ));
+    }
+    Ok((query, limit))
+}
+
 impl ToolSearchHandler {
+    /// A `tool_search` call outside a session: the handler's validation, without the
+    /// MCP description prefixes a session applies.
+    pub(crate) fn search_arguments(
+        &self,
+        args: &codex_protocol::models::SearchToolCallParams,
+    ) -> Result<Vec<LoadableToolSpec>, FunctionCallError> {
+        let (query, limit) = query_and_limit(args)?;
+        if self.search_infos.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(self.search(query, limit))
+    }
+
+    /// The loadable specs of the entries `matches` selects, in entry order.
+    pub(crate) fn load(
+        &self,
+        mut matches: impl FnMut(&LoadableToolSpec) -> bool,
+    ) -> Vec<LoadableToolSpec> {
+        coalesce_loadable_tool_specs(
+            self.search_infos
+                .iter()
+                .map(|search_info| search_info.entry.to_loadable_spec())
+                .filter(|spec| matches(spec)),
+        )
+    }
+
     fn search_code_mode(
         &self,
         query: &str,

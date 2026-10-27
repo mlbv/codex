@@ -246,8 +246,9 @@ impl LunaSampler {
             model: MODEL.to_owned(),
             input,
             tools: None,
-            tool_choice: "none".to_owned(),
+            tool_choice: codex_api::ToolChoice::None,
             parallel_tool_calls: false,
+            max_output_tokens: None,
             reasoning: Some(Reasoning {
                 effort: Some(request.reasoning_effort.clone()),
                 summary: None,

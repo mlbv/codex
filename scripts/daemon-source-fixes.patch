@@ -1,0 +1,1273 @@
+diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
+index 11f0555325..e0f86c75f0 100644
+--- a/codex-rs/app-server/src/bespoke_event_handling.rs
++++ b/codex-rs/app-server/src/bespoke_event_handling.rs
+@@ -1602,7 +1602,9 @@ async fn handle_token_count_event(
+     token_count_event: TokenCountEvent,
+     outgoing: &ThreadScopedOutgoingMessageSender,
+ ) {
+-    let TokenCountEvent { info, rate_limits } = token_count_event;
++    let TokenCountEvent {
++        info, rate_limits, ..
++    } = token_count_event;
+     if let Some(token_usage) = info.map(ThreadTokenUsage::from) {
+         let notification = ThreadTokenUsageUpdatedNotification {
+             thread_id: conversation_id.to_string(),
+@@ -3751,6 +3753,7 @@ mod tests {
+             conversation_id,
+             turn_id.clone(),
+             TokenCountEvent {
++                accounting: None,
+                 info: Some(info),
+                 rate_limits: Some(rate_limits),
+             },
+@@ -3804,6 +3807,7 @@ mod tests {
+             conversation_id,
+             turn_id.clone(),
+             TokenCountEvent {
++                accounting: None,
+                 info: None,
+                 rate_limits: None,
+             },
+diff --git a/codex-rs/app-server/src/request_processors/token_usage_replay.rs b/codex-rs/app-server/src/request_processors/token_usage_replay.rs
+index c6d21f4cfe..b6c5b62726 100644
+--- a/codex-rs/app-server/src/request_processors/token_usage_replay.rs
++++ b/codex-rs/app-server/src/request_processors/token_usage_replay.rs
+@@ -181,6 +181,7 @@ mod tests {
+                 questions: None,
+             })),
+             RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++                accounting: None,
+                 info: None,
+                 rate_limits: None,
+             })),
+diff --git a/codex-rs/app-server/tests/common/rollout.rs b/codex-rs/app-server/tests/common/rollout.rs
+index 75a48b5987..9a7e5eaf49 100644
+--- a/codex-rs/app-server/tests/common/rollout.rs
++++ b/codex-rs/app-server/tests/common/rollout.rs
+@@ -115,6 +115,7 @@ pub fn create_fake_rollout_with_token_usage(
+         /*git_info*/ None,
+     )?;
+     let payload = serde_json::to_value(EventMsg::TokenCount(TokenCountEvent {
++        accounting: None,
+         info: Some(TokenUsageInfo {
+             total_token_usage: TokenUsage {
+                 input_tokens: 120,
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+index b872aab23f..1c9f9ce344 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+@@ -4130,6 +4130,7 @@ async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<
+     append_rollout_item_to_path(
+         &path,
+         &RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++            accounting: None,
+             info: Some(TokenUsageInfo {
+                 total_token_usage: TokenUsage {
+                     input_tokens: 120,
+@@ -4211,6 +4212,7 @@ async fn cold_paginated_resume_omits_usage_when_its_turn_is_ambiguous() -> Resul
+     append_rollout_item_to_path(
+         &path,
+         &RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++            accounting: None,
+             info: Some(TokenUsageInfo {
+                 total_token_usage: TokenUsage {
+                     total_tokens: 150,
+@@ -4490,6 +4492,7 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
+             "timestamp": meta_rfc3339,
+             "type": "event_msg",
+             "payload": serde_json::to_value(EventMsg::TokenCount(TokenCountEvent {
++                accounting: None,
+                 info: Some(TokenUsageInfo {
+                     total_token_usage: TokenUsage {
+                         input_tokens: 180,
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 163e7d53e4..ab82d4fbbf 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -826,8 +826,10 @@ async fn drain_to_completed(
+     prompt: &Prompt,
+     phase: CompactionPhase,
+ ) -> CodexResult<CompactionResponse> {
+-    sess.set_server_reasoning_included(turn_context.model_info().use_responses_lite)
+-        .await;
++    sess.set_server_reasoning_included(
++        turn_context.model_info().use_responses_lite.then_some(true),
++    )
++    .await;
+     let mut stream = client_session
+         .stream(
+             prompt,
+@@ -858,7 +860,7 @@ async fn drain_to_completed(
+             // Keep each attempt isolated until the response completes successfully.
+             Ok(ResponseEvent::OutputItemDone(item)) => output.push(item),
+             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
+-                sess.set_server_reasoning_included(included).await;
++                sess.set_server_reasoning_included(Some(included)).await;
+             }
+             Ok(ResponseEvent::RateLimits(snapshot)) => {
+                 sess.update_rate_limits(turn_context, snapshot).await;
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index f39be3fb41..585000cf7d 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -58,6 +58,7 @@ use codex_protocol::openai_models::InputModality;
+ use codex_protocol::protocol::InterAgentCommunication;
+ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::TokenUsage;
++use codex_protocol::protocol::TokenUsageAccounting;
+ use codex_protocol::protocol::TokenUsageInfo;
+ use codex_protocol::protocol::TurnContextItem;
+ use codex_protocol::protocol::WorldStateItem;
+@@ -110,6 +111,11 @@ pub(crate) struct ContextManager {
+     /// Process-unique so resumed roots cannot match a worker's cached assistant evidence.
+     guardian_review_context_revision: u64,
+     token_info: Option<TokenUsageInfo>,
++    /// Past reasoning omitted from the input usage of the last completed response.
++    /// Keep this estimate tied to that response, even when another user turn starts.
++    non_last_reasoning_tokens: i64,
++    /// Items covered by the current context baseline, including full local recounts.
++    token_usage_history_len: usize,
+     /// Reference context snapshot used for diffing and producing model-visible
+     /// settings update items.
+     ///
+@@ -247,6 +253,8 @@ impl ContextManager {
+             token_info: TokenUsageInfo::new_or_append(
+                 &None, &None, /*model_context_window*/ None,
+             ),
++            non_last_reasoning_tokens: 0,
++            token_usage_history_len: 0,
+             reference_context_item: None,
+             world_state_baseline: None,
+         }
+@@ -437,9 +445,57 @@ impl ContextManager {
+     }
+ 
+     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
++        if self.token_info.as_ref().map(|info| &info.last_token_usage)
++            != info.as_ref().map(|info| &info.last_token_usage)
++        {
++            self.non_last_reasoning_tokens = 0;
++            self.token_usage_history_len = 0;
++        }
+         self.token_info = info;
+     }
+ 
++    pub(crate) fn token_usage_accounting(&self) -> TokenUsageAccounting {
++        TokenUsageAccounting {
++            non_last_reasoning_tokens: self.non_last_reasoning_tokens,
++            history_baseline_len: self.token_usage_history_len,
++        }
++    }
++
++    pub(crate) fn restore_token_info(
++        &mut self,
++        info: Option<TokenUsageInfo>,
++        accounting: Option<TokenUsageAccounting>,
++    ) {
++        self.token_info = info;
++        if let Some(accounting) = accounting {
++            self.non_last_reasoning_tokens = accounting.non_last_reasoning_tokens;
++            self.token_usage_history_len = accounting.history_baseline_len;
++        } else {
++            // Keep reported usage, discarding unproven reasoning and tail supplements.
++            self.non_last_reasoning_tokens = 0;
++            self.token_usage_history_len = self.items.len();
++        }
++    }
++
++    pub(crate) fn set_token_estimate(&mut self, tokens: i64, model_context_window: Option<i64>) {
++        let mut info = self.token_info.clone().unwrap_or(TokenUsageInfo {
++            total_token_usage: TokenUsage::default(),
++            last_token_usage: TokenUsage::default(),
++            model_context_window: None,
++        });
++        info.last_token_usage = TokenUsage {
++            total_tokens: tokens.max(0),
++            ..Default::default()
++        };
++        if let Some(model_context_window) = model_context_window {
++            info.model_context_window = Some(model_context_window);
++        }
++        self.token_info = Some(info);
++        // The full history estimate already includes encrypted reasoning.
++        self.non_last_reasoning_tokens = 0;
++        self.token_usage_history_len = self.items.len();
++    }
++
+     pub(crate) fn set_reference_context_item(&mut self, item: Option<TurnContextItem>) {
+         self.reference_context_item = item;
+     }
+@@ -495,6 +551,8 @@ impl ContextManager {
+     }
+ 
+     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
++        self.non_last_reasoning_tokens = 0;
++        self.token_usage_history_len = self.items.len();
+         match &mut self.token_info {
+             Some(info) => info.fill_to_context_window(context_window),
+             None => {
+@@ -686,12 +744,16 @@ impl ContextManager {
+         if !self.items.is_empty() {
+             // Remove the oldest item (front of the list). Items are ordered from
+             // oldest → newest, so index 0 is the first entry recorded.
++            let previous_len = self.items.len();
+             let items = Arc::make_mut(&mut self.items);
+             let removed = items.remove(0);
+             // If the removed item participates in a call/output pair, also remove
+             // its corresponding counterpart to keep the invariants intact without
+             // running a full normalization pass.
+             normalize::remove_corresponding_for(items, &removed.item);
++            self.token_usage_history_len = self
++                .token_usage_history_len
++                .saturating_sub(previous_len - items.len());
+             self.world_state_baseline = None;
+         }
+     }
+@@ -712,6 +774,8 @@ impl ContextManager {
+             );
+         }
+         self.items = Arc::new(items);
++        self.token_usage_history_len = 0;
++        self.non_last_reasoning_tokens = 0;
+         self.history_version = self.history_version.saturating_add(1);
+         self.reset_version = self.history_version;
+         self.world_state_baseline = None;
+@@ -750,6 +814,8 @@ impl ContextManager {
+             self.review_history = Some(retained);
+         }
+         self.items = Arc::new(items);
++        self.token_usage_history_len = 0;
++        self.non_last_reasoning_tokens = 0;
+         self.history_version = self.history_version.saturating_add(1);
+         if promoted {
+             self.reset_version = self.history_version;
+@@ -887,7 +953,15 @@ impl ContextManager {
+         &mut self,
+         usage: &TokenUsage,
+         model_context_window: Option<i64>,
++        server_reasoning_included: Option<bool>,
+     ) {
++        // Missing coverage metadata does not establish that reported usage omitted reasoning.
++        self.non_last_reasoning_tokens = if server_reasoning_included == Some(false) {
++            self.get_non_last_reasoning_items_tokens()
++        } else {
++            0
++        };
++        self.token_usage_history_len = 0;
+         self.token_info = TokenUsageInfo::new_or_append(
+             &self.token_info,
+             &Some(usage.clone()),
+@@ -896,9 +970,14 @@ impl ContextManager {
+     }
+ 
+     fn get_non_last_reasoning_items_tokens(&self) -> i64 {
+-        // Get reasoning items excluding all the ones after the last instruction boundary.
+-        let Some(last_user_index) = self
++        // A trailing user message has not been sampled yet. Find the instruction
++        // boundary of the latest model response, including when restoring usage.
++        let response_end = self
+             .items
++            .iter()
++            .rposition(|envelope| is_model_generated_item(&envelope.item))
++            .map_or(self.items.len(), |index| index.saturating_add(1));
++        let Some(last_user_index) = self.items[..response_end]
+             .iter()
+             .rposition(|envelope| is_user_turn_boundary(&envelope.item))
+         else {
+@@ -921,8 +1000,8 @@ impl ContextManager {
+             .fold(0i64, i64::saturating_add)
+     }
+ 
+-    // These are local items added after the most recent model-emitted item.
+-    // They are not reflected in `last_token_usage.total_tokens`.
++    // Local items after the most recent model-emitted item that are not already
++    // covered by the server usage or a full local recount.
+     fn items_after_last_model_generated_item(
+         &self,
+     ) -> impl Clone + ExactSizeIterator<Item = &ResponseItem> + DoubleEndedIterator {
+@@ -930,13 +1009,13 @@ impl ContextManager {
+             .items
+             .iter()
+             .rposition(|envelope| is_model_generated_item(&envelope.item))
+-            .map_or(self.items.len(), |index| index.saturating_add(1));
++            .map_or(self.items.len(), |index| index.saturating_add(1))
++            .max(self.token_usage_history_len.min(self.items.len()));
+         self.items[start..].iter().map(|envelope| &envelope.item)
+     }
+ 
+-    /// When true, the server already accounted for past reasoning tokens and
+-    /// the client should not re-estimate them.
+-    pub(crate) fn get_total_token_usage(&self, server_reasoning_included: bool) -> i64 {
++    /// Reasoning coverage belongs to the usage baseline, not the next request's flags.
++    pub(crate) fn get_total_token_usage(&self) -> i64 {
+         let last_tokens = self
+             .token_info
+             .as_ref()
+@@ -946,13 +1025,9 @@ impl ContextManager {
+             .items_after_last_model_generated_item()
+             .map(estimate_item_token_count)
+             .fold(0i64, i64::saturating_add);
+-        if server_reasoning_included {
+-            last_tokens.saturating_add(items_after_last_model_generated_tokens)
+-        } else {
+-            last_tokens
+-                .saturating_add(self.get_non_last_reasoning_items_tokens())
+-                .saturating_add(items_after_last_model_generated_tokens)
+-        }
++        last_tokens
++            .saturating_add(self.non_last_reasoning_tokens)
++            .saturating_add(items_after_last_model_generated_tokens)
+     }
+ 
+     pub(crate) fn estimated_tokens_after_last_model_generated_item(&self) -> i64 {
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+index 70178c446f..e2e52aa8ff 100644
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -1140,6 +1140,124 @@ fn legacy_inter_agent_assistant_messages_are_not_turn_boundaries() {
+     assert!(!is_user_turn_boundary(&item));
+ }
+ 
++#[test]
++fn total_token_usage_does_not_recount_reported_reasoning_when_user_turn_starts() {
++    for server_reasoning_included in [None, Some(false), Some(true)] {
++        let first_reasoning = reasoning_with_encrypted_content(2_000);
++        let mut history = create_history_with_items(vec![
++            user_msg("first"),
++            first_reasoning.clone(),
++            assistant_msg("first answer"),
++        ]);
++        history.update_token_info(
++            &TokenUsage {
++                input_tokens: 100,
++                output_tokens: 40,
++                total_tokens: 140,
++                ..Default::default()
++            },
++            None,
++            server_reasoning_included,
++        );
++        let next_user = user_msg("second");
++        history.record_items([&next_user], TruncationPolicy::Tokens(10_000));
++        assert_eq!(
++            history.get_total_token_usage(),
++            140 + estimate_item_token_count(&next_user)
++        );
++        let mut restored = create_history_with_items(raw_items(&history));
++        restored.restore_token_info(history.token_info(), Some(history.token_usage_accounting()));
++        assert_eq!(
++            restored.get_total_token_usage(),
++            history.get_total_token_usage()
++        );
++        let legacy_accounting = serde_json::from_value(serde_json::json!({
++            "non_last_reasoning_tokens": 10_000,
++            "history_baseline_len": 0,
++        }))
++        .unwrap();
++        restored.restore_token_info(history.token_info(), Some(legacy_accounting));
++        assert_eq!(
++            restored.get_total_token_usage(),
++            140 + estimate_item_token_count(&next_user)
++        );
++        restored.restore_token_info(history.token_info(), None);
++        assert_eq!(restored.get_total_token_usage(), 140);
++
++        let mut info = history.token_info().unwrap();
++        info.total_token_usage.total_tokens += 50;
++        history.set_token_info(Some(info));
++        assert_eq!(
++            history.get_total_token_usage(),
++            140 + estimate_item_token_count(&next_user)
++        );
++
++        history.record_items(
++            [
++                &reasoning_with_encrypted_content(3_000),
++                &assistant_msg("second answer"),
++            ],
++            TruncationPolicy::Tokens(10_000),
++        );
++        history.update_token_info(
++            &TokenUsage {
++                input_tokens: 200,
++                output_tokens: 60,
++                total_tokens: 260,
++                ..Default::default()
++            },
++            None,
++            server_reasoning_included,
++        );
++        let expected = if server_reasoning_included == Some(false) {
++            260 + estimate_item_token_count(&first_reasoning)
++        } else {
++            260
++        };
++        assert_eq!(history.get_total_token_usage(), expected);
++        let third_user = user_msg("third");
++        history.record_items([&third_user], TruncationPolicy::Tokens(10_000));
++        assert_eq!(
++            history.get_total_token_usage(),
++            expected + estimate_item_token_count(&third_user)
++        );
++    }
++}
++
++#[test]
++fn total_token_usage_does_not_recount_reasoning_in_full_history_estimate() {
++    let mut history = create_history_with_items(vec![
++        user_msg("first"),
++        reasoning_with_encrypted_content(2_000),
++        assistant_msg("first answer"),
++        user_msg("second"),
++        assistant_msg("second answer"),
++        user_msg("already included in the local recount"),
++    ]);
++    history.update_token_info(
++        &TokenUsage {
++            total_tokens: 100,
++            ..Default::default()
++        },
++        Some(128_000),
++        /*server_reasoning_included*/ Some(false),
++    );
++    let estimate = history
++        .estimate_token_count_with_base_instructions(&BaseInstructions::default())
++        .unwrap();
++    history.set_token_estimate(estimate, None);
++    assert_eq!(history.get_total_token_usage(), estimate);
++    let info = history.token_info().unwrap();
++    assert_eq!(info.total_token_usage.total_tokens, 100);
++    assert_eq!(info.model_context_window, Some(128_000));
++    let tool_output = custom_tool_call_output("new-tail", "added after the recount");
++    history.record_items([&tool_output], TruncationPolicy::Tokens(10_000));
++    assert_eq!(
++        history.get_total_token_usage(),
++        estimate + estimate_item_token_count(&tool_output)
++    );
++}
++
+ #[test]
+ fn total_token_usage_includes_all_items_after_last_model_generated_item() {
+     let mut history = create_history_with_items(vec![assistant_msg("already counted by API")]);
+@@ -1149,6 +1267,7 @@ fn total_token_usage_includes_all_items_after_last_model_generated_item() {
+             ..Default::default()
+         },
+         /*model_context_window*/ None,
++        /*server_reasoning_included*/ Some(true),
+     );
+     let added_user = user_msg("new user message");
+     let added_tool_output = custom_tool_call_output("tool-tail", "new tool output");
+@@ -1158,12 +1277,43 @@ fn total_token_usage_includes_all_items_after_last_model_generated_item() {
+     );
+ 
+     assert_eq!(
+-        history.get_total_token_usage(/*server_reasoning_included*/ true),
++        history.get_total_token_usage(),
+         100 + estimate_item_token_count(&added_user)
+             + estimate_item_token_count(&added_tool_output)
+     );
+ }
+ 
++#[test]
++fn total_token_usage_full_window_does_not_add_reasoning_or_covered_tail() {
++    let mut history = create_history_with_items(vec![
++        user_msg("first"),
++        reasoning_with_encrypted_content(2_000),
++        assistant_msg("first answer"),
++        user_msg("second"),
++        assistant_msg("second answer"),
++    ]);
++    history.update_token_info(
++        &TokenUsage {
++            total_tokens: 260,
++            ..Default::default()
++        },
++        None,
++        Some(false),
++    );
++    assert!(history.get_total_token_usage() > 260);
++    history.record_items(
++        [&user_msg("already covered")],
++        TruncationPolicy::Tokens(10_000),
++    );
++    history.set_token_usage_full(128_000);
++    // Upstream fills cumulative usage and records the remaining amount as last usage.
++    assert_eq!(
++        history.token_info().unwrap().total_token_usage.total_tokens,
++        128_000
++    );
++    assert_eq!(history.get_total_token_usage(), 128_000 - 260);
++}
++
+ #[test]
+ fn for_prompt_strips_media_when_model_does_not_support_it() {
+     let items = vec![
+diff --git a/codex-rs/core/src/session/guardian_checkpoint.rs b/codex-rs/core/src/session/guardian_checkpoint.rs
+index 4ccfef86ab..b0d856abcc 100644
+--- a/codex-rs/core/src/session/guardian_checkpoint.rs
++++ b/codex-rs/core/src/session/guardian_checkpoint.rs
+@@ -36,6 +36,7 @@ impl Session {
+             TokenCountEvent {
+                 info: history.token_info(),
+                 rate_limits: None,
++                accounting: Some(history.token_usage_accounting()),
+             },
+         )));
+         items
+diff --git a/codex-rs/core/src/session/guardian_checkpoint_tests.rs b/codex-rs/core/src/session/guardian_checkpoint_tests.rs
+index 6ff5ab3589..d177e7f549 100644
+--- a/codex-rs/core/src/session/guardian_checkpoint_tests.rs
++++ b/codex-rs/core/src/session/guardian_checkpoint_tests.rs
+@@ -78,6 +78,7 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
+                 ..Default::default()
+             },
+             Some(32_000),
++            /*server_reasoning_included*/ Some(false),
+         );
+     }
+     let expected = session.clone_history().await;
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 96cfaa1970..846a4ebd54 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1560,7 +1560,7 @@ impl Session {
+ 
+     pub(crate) async fn get_total_token_usage(&self) -> i64 {
+         let state = self.state.lock().await;
+-        state.get_total_token_usage(state.server_reasoning_included())
++        state.get_total_token_usage()
+     }
+ 
+     pub(crate) async fn auto_compact_window_snapshot(&self) -> AutoCompactWindowSnapshot {
+@@ -1719,10 +1719,7 @@ impl Session {
+ 
+                 // Seed usage info from the recorded rollout so UIs can show token counts
+                 // immediately on resume/fork.
+-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
+-                    let mut state = self.state.lock().await;
+-                    state.set_token_info(Some(info));
+-                }
++                self.restore_token_usage_from_rollout(&rollout_items).await;
+                 self.state.lock().await.latest_token_usage_record =
+                     Self::last_token_usage_record_from_rollout(&rollout_items);
+ 
+@@ -1747,10 +1744,7 @@ impl Session {
+ 
+                 // Seed usage info from the recorded rollout so UIs can show token counts
+                 // immediately on resume/fork.
+-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
+-                    let mut state = self.state.lock().await;
+-                    state.set_token_info(Some(info));
+-                }
++                self.restore_token_usage_from_rollout(&rollout_items).await;
+                 self.state.lock().await.latest_token_usage_record =
+                     Self::last_token_usage_record_from_rollout(&rollout_items);
+ 
+@@ -1938,11 +1932,30 @@ impl Session {
+         state.set_auto_compact_window_estimated_prefill(tokens);
+     }
+ 
+-    fn last_token_info_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenUsageInfo> {
+-        rollout_items.iter().rev().find_map(|item| match item {
+-            RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
+-            _ => None,
+-        })
++    async fn restore_token_usage_from_rollout(&self, rollout_items: &[RolloutItem]) {
++        let mut history_replaced = false;
++        for item in rollout_items.iter().rev() {
++            match item {
++                RolloutItem::Compacted(_)
++                | RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)) => history_replaced = true,
++                RolloutItem::EventMsg(EventMsg::TokenCount(event))
++                    if event.info.is_some() || event.accounting.is_some() =>
++                {
++                    let accounting = if history_replaced {
++                        None
++                    } else {
++                        event.accounting
++                    };
++                    self.state
++                        .lock()
++                        .await
++                        .history
++                        .restore_token_info(event.info.clone(), accounting);
++                    return;
++                }
++                _ => {}
++            }
++        }
+     }
+ 
+     fn last_token_usage_record_from_rollout(
+@@ -5230,29 +5243,7 @@ impl Session {
+         };
+         {
+             let mut state = self.state.lock().await;
+-            let mut info = state.token_info().unwrap_or(TokenUsageInfo {
+-                total_token_usage: TokenUsage::default(),
+-                last_token_usage: TokenUsage::default(),
+-                model_context_window: None,
+-            });
+-
+-            info.last_token_usage = TokenUsage {
+-                input_tokens: 0,
+-                cached_input_tokens: 0,
+-                cache_write_input_tokens: 0,
+-                output_tokens: 0,
+-                reasoning_output_tokens: 0,
+-                total_tokens: estimated_total_tokens.max(0),
+-                codex_rollout_budget_units: None,
+-            };
+-
+-            if let Some(model_context_window) = turn_context.model_context_window() {
+-                info.model_context_window = Some(model_context_window);
+-            }
+-
+-            state.set_token_info(Some(info));
+-            // The local estimate already includes every retained reasoning item.
+-            state.set_server_reasoning_included(/*included*/ true);
++            state.set_token_estimate(estimated_total_tokens, turn_context.model_context_window());
+         }
+         self.set_auto_compact_window_estimated_prefill_for_scope(
+             turn_context,
+@@ -5291,17 +5282,26 @@ impl Session {
+         state.record_mcp_dependency_prompted(names);
+     }
+ 
+-    pub(crate) async fn set_server_reasoning_included(&self, included: bool) {
++    pub(crate) async fn set_server_reasoning_included(&self, included: Option<bool>) {
+         let mut state = self.state.lock().await;
+         state.set_server_reasoning_included(included);
+     }
+ 
+     pub(crate) async fn send_token_count_event(&self, turn_context: &TurnContext) {
+-        let (info, rate_limits) = {
++        let (info, rate_limits, accounting) = {
+             let state = self.state.lock().await;
+-            state.token_info_and_rate_limits()
++            let (info, rate_limits) = state.token_info_and_rate_limits();
++            (
++                info,
++                rate_limits,
++                Some(state.history.token_usage_accounting()),
++            )
+         };
+-        let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
++        let event = EventMsg::TokenCount(TokenCountEvent {
++            info,
++            rate_limits,
++            accounting,
++        });
+         self.send_event(turn_context, event).await;
+     }
+ 
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 7bd3a385bc..4887068b0d 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -3335,6 +3335,90 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only()
+     );
+ }
+ 
++#[tokio::test]
++async fn token_usage_reasoning_coverage_missing_metadata_does_not_trigger_auto_compaction() {
++    let (session, turn_context, _events) = make_session_and_context_with_auth_and_config_and_rx(
++        codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++        Vec::new(),
++        |config| {
++            config.model = Some("gpt-5.2".to_string());
++            config.model_context_window = Some(1_000);
++            config.model_auto_compact_token_limit = Some(800);
++        },
++    )
++    .await;
++    let reasoning = serde_json::from_value(serde_json::json!({
++        "type": "reasoning",
++        "summary": [],
++        "encrypted_content": "a".repeat(4_000),
++    }))
++    .unwrap();
++    session
++        .replace_history(
++            vec![
++                user_message("first"),
++                reasoning,
++                assistant_message("first answer"),
++            ],
++            /*reference_context_item*/ None,
++        )
++        .await;
++    session
++        .update_token_usage_info(
++            &turn_context,
++            Some(&TokenUsage {
++                total_tokens: 590,
++                ..Default::default()
++            }),
++        )
++        .await
++        .unwrap();
++
++    // A new turn clears coverage; a response without metadata must not imply exclusion.
++    session.set_server_reasoning_included(None).await;
++    session
++        .record_conversation_items(
++            &turn_context,
++            turn_context.model_info(),
++            &[user_message("second")],
++        )
++        .await;
++
++    let status = super::context_window::context_window_token_status(&session, &turn_context).await;
++    assert!(status.active_context_tokens >= 590);
++    assert!(!status.token_limit_reached);
++    assert!(!status.full_context_window_limit_reached);
++
++    session
++        .record_conversation_items(
++            &turn_context,
++            turn_context.model_info(),
++            &[assistant_message("second answer")],
++        )
++        .await;
++
++    // Fresh server usage controls compaction even when coverage metadata stays absent.
++    for (total_tokens, token_limit_reached) in [(600, false), (810, true)] {
++        session
++            .update_token_usage_info(
++                &turn_context,
++                Some(&TokenUsage {
++                    total_tokens,
++                    ..Default::default()
++                }),
++            )
++            .await
++            .unwrap();
++
++        let status =
++            super::context_window::context_window_token_status(&session, &turn_context).await;
++        assert_eq!(status.active_context_tokens, total_tokens);
++        assert_eq!(status.auto_compact_scope_limit, Some(800));
++        assert_eq!(status.token_limit_reached, token_limit_reached);
++        assert!(!status.full_context_window_limit_reached);
++    }
++}
++
+ #[tokio::test]
+ async fn record_initial_history_seeds_token_info_from_rollout() {
+     let (session, turn_context) = make_session_and_context().await;
+@@ -3385,24 +3469,31 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
+ 
+     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+         TokenCountEvent {
++            accounting: None,
+             info: Some(info1),
+             rate_limits: None,
+         },
+     )));
+     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+         TokenCountEvent {
++            accounting: None,
+             info: None,
+             rate_limits: None,
+         },
+     )));
+     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+         TokenCountEvent {
++            accounting: Some(codex_protocol::protocol::TokenUsageAccounting {
++                non_last_reasoning_tokens: 13,
++                history_baseline_len: 0,
++            }),
+             info: Some(info2.clone()),
+             rate_limits: None,
+         },
+     )));
+     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+         TokenCountEvent {
++            accounting: None,
+             info: None,
+             rate_limits: None,
+         },
+@@ -3419,6 +3510,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
+ 
+     let actual = session.state.lock().await.token_info();
+     assert_eq!(actual, Some(info2));
++    assert_eq!(session.get_total_token_usage().await, 48);
+ }
+ 
+ #[test]
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 32fdf7bd27..345f1c431a 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2722,8 +2722,14 @@ async fn try_run_sampling_request(
+     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
+     let mut response_completed = false;
+     let mut request_token_usage = None;
+-    sess.set_server_reasoning_included(step_context.settings.model_info.use_responses_lite)
+-        .await;
++    sess.set_server_reasoning_included(
++        step_context
++            .settings
++            .model_info
++            .use_responses_lite
++            .then_some(true),
++    )
++    .await;
+     let mut stream = match client_session
+         .stream(
+             prompt,
+@@ -3159,7 +3165,7 @@ async fn try_run_sampling_request(
+                 .await;
+             }
+             ResponseEvent::ServerReasoningIncluded(included) => {
+-                sess.set_server_reasoning_included(included).await;
++                sess.set_server_reasoning_included(Some(included)).await;
+             }
+             ResponseEvent::RateLimits(snapshot) => {
+                 // Update internal state with latest rate limits, but defer sending until
+diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
+index d122db22d8..d3427be8b4 100644
+--- a/codex-rs/core/src/state/session.rs
++++ b/codex-rs/core/src/state/session.rs
+@@ -77,7 +77,7 @@ pub(crate) struct SessionState {
+     pub(crate) history_reset: CancellationToken,
+     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
+     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
+-    pub(crate) server_reasoning_included: bool,
++    pub(crate) server_reasoning_included: Option<bool>,
+     pub(crate) mcp_dependency_prompted: HashSet<String>,
+     pub(crate) additional_context: AdditionalContextStore,
+     /// Settings used by the latest regular user turn, used for turn-to-turn
+@@ -131,7 +131,7 @@ impl SessionState {
+             history_reset: CancellationToken::new(),
+             latest_rate_limits: None,
+             latest_token_usage_record: None,
+-            server_reasoning_included: false,
++            server_reasoning_included: None,
+             mcp_dependency_prompted: HashSet::new(),
+             additional_context: AdditionalContextStore::default(),
+             previous_turn_settings: None,
+@@ -225,6 +225,11 @@ impl SessionState {
+         self.history.set_token_info(info);
+     }
+ 
++    pub(crate) fn set_token_estimate(&mut self, tokens: i64, model_context_window: Option<i64>) {
++        self.history
++            .set_token_estimate(tokens, model_context_window);
++    }
++
+     pub(crate) fn record_token_usage(
+         &mut self,
+         thread_id: ThreadId,
+@@ -292,7 +297,8 @@ impl SessionState {
+         usage: &TokenUsage,
+         model_context_window: Option<i64>,
+     ) {
+-        self.history.update_token_info(usage, model_context_window);
++        self.history
++            .update_token_info(usage, model_context_window, self.server_reasoning_included);
+     }
+ 
+     pub(crate) fn ensure_auto_compact_window_server_prefill_from_usage(
+@@ -374,19 +380,14 @@ impl SessionState {
+         self.history.set_token_usage_full(context_window);
+     }
+ 
+-    pub(crate) fn get_total_token_usage(&self, server_reasoning_included: bool) -> i64 {
+-        self.history
+-            .get_total_token_usage(server_reasoning_included)
++    pub(crate) fn get_total_token_usage(&self) -> i64 {
++        self.history.get_total_token_usage()
+     }
+ 
+-    pub(crate) fn set_server_reasoning_included(&mut self, included: bool) {
++    pub(crate) fn set_server_reasoning_included(&mut self, included: Option<bool>) {
+         self.server_reasoning_included = included;
+     }
+ 
+-    pub(crate) fn server_reasoning_included(&self) -> bool {
+-        self.server_reasoning_included
+-    }
+-
+     pub(crate) fn record_mcp_dependency_prompted<I>(&mut self, names: I)
+     where
+         I: IntoIterator<Item = String>,
+diff --git a/codex-rs/core/src/state/session_tests.rs b/codex-rs/core/src/state/session_tests.rs
+index 5d3defeefe..f16e0ea7d5 100644
+--- a/codex-rs/core/src/state/session_tests.rs
++++ b/codex-rs/core/src/state/session_tests.rs
+@@ -10,6 +10,151 @@ use codex_protocol::protocol::TokenUsage;
+ use codex_protocol::protocol::TokenUsageRecord;
+ use pretty_assertions::assert_eq;
+ 
++fn reasoning_accounting_history() -> Vec<codex_protocol::models::ResponseItem> {
++    use serde_json::json;
++    [
++        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}),
++        json!({"type":"reasoning","summary":[],"encrypted_content":"a".repeat(2_000)}),
++        json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}),
++        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}),
++        json!({"type":"reasoning","summary":[],"encrypted_content":"b".repeat(3_000)}),
++        json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"second answer"}]}),
++    ].into_iter().map(|value| serde_json::from_value(value).unwrap()).collect()
++}
++
++#[tokio::test]
++async fn token_usage_reasoning_coverage_survives_new_user_turn() {
++    use codex_protocol::models::BaseInstructions;
++    use codex_utils_output_truncation::TruncationPolicy;
++    for included in [None, Some(false), Some(true)] {
++        let mut state = SessionState::new(make_session_configuration_for_tests().await);
++        state.history.record_items(
++            reasoning_accounting_history().iter(),
++            TruncationPolicy::Tokens(10_000),
++        );
++        state.set_server_reasoning_included(included);
++        state.update_token_info_from_usage(
++            &TokenUsage {
++                total_tokens: 260,
++                ..Default::default()
++            },
++            None,
++        );
++        let baseline = state.get_total_token_usage();
++        if included == Some(false) {
++            assert!(baseline > 260);
++        } else {
++            assert_eq!(baseline, 260);
++        }
++        // Missing response metadata leaves coverage unknown for the next request.
++        state.set_server_reasoning_included(None);
++        assert_eq!(state.get_total_token_usage(), baseline);
++        let before = state
++            .history
++            .estimate_token_count_with_base_instructions(&BaseInstructions::default())
++            .unwrap();
++        let fresh = serde_json::from_value::<codex_protocol::models::ResponseItem>(serde_json::json!({
++            "type":"message","role":"user","content":[{"type":"input_text","text":"fresh user input"}]
++        })).unwrap();
++        state
++            .history
++            .record_items([&fresh], TruncationPolicy::Tokens(10_000));
++        let after = state
++            .history
++            .estimate_token_count_with_base_instructions(&BaseInstructions::default())
++            .unwrap();
++        assert_eq!(state.get_total_token_usage(), baseline + after - before);
++    }
++}
++
++#[tokio::test]
++async fn token_usage_reasoning_coverage_survives_rollout_roundtrip() {
++    use codex_history::RolloutItem;
++    use codex_protocol::models::BaseInstructions;
++    use codex_protocol::protocol::{EventMsg, TokenCountEvent};
++    use codex_utils_output_truncation::TruncationPolicy;
++    for server_reasoning_included in [None, Some(false), Some(true)] {
++        let mut state = SessionState::new(make_session_configuration_for_tests().await);
++        state.history.record_items(
++            reasoning_accounting_history().iter(),
++            TruncationPolicy::Tokens(10_000),
++        );
++        let tail = serde_json::from_value::<codex_protocol::models::ResponseItem>(serde_json::json!({
++            "type":"message","role":"user","content":[{"type":"input_text","text":"included in full recount"}]
++        })).unwrap();
++        state
++            .history
++            .record_items([&tail], TruncationPolicy::Tokens(10_000));
++        let estimate = state
++            .history
++            .estimate_token_count_with_base_instructions(&BaseInstructions::default())
++            .unwrap();
++        match server_reasoning_included {
++            Some(included) => {
++                state.set_server_reasoning_included(Some(included));
++                state.update_token_info_from_usage(
++                    &TokenUsage {
++                        total_tokens: 260,
++                        ..Default::default()
++                    },
++                    None,
++                );
++            }
++            None => state.set_token_estimate(estimate, None),
++        }
++        let baseline = state.get_total_token_usage();
++        let event = EventMsg::TokenCount(TokenCountEvent {
++            info: state.token_info(),
++            rate_limits: None,
++            accounting: Some(state.history.token_usage_accounting()),
++        });
++        let public = serde_json::to_value(&event).unwrap();
++        assert!(public.get("accounting").is_none());
++        let encoded = serde_json::to_value(RolloutItem::EventMsg(event)).unwrap();
++        assert!(encoded.get("accounting").is_some());
++        assert!(
++            encoded["accounting"]
++                .get("confirmed_excluded_reasoning_tokens")
++                .is_some()
++        );
++        assert!(
++            encoded["accounting"]
++                .get("non_last_reasoning_tokens")
++                .is_none()
++        );
++        assert!(encoded["payload"].get("accounting").is_none());
++        let RolloutItem::EventMsg(EventMsg::TokenCount(event)) =
++            serde_json::from_value(encoded).unwrap()
++        else {
++            panic!("expected a token-count record");
++        };
++        let mut restored = SessionState::new(make_session_configuration_for_tests().await);
++        restored
++            .history
++            .record_items(state.history.raw_items(), TruncationPolicy::Tokens(10_000));
++        restored
++            .history
++            .restore_token_info(event.info, event.accounting);
++        restored.set_server_reasoning_included(None);
++        assert_eq!(restored.get_total_token_usage(), baseline);
++        let fresh = serde_json::from_value::<codex_protocol::models::ResponseItem>(serde_json::json!({
++            "type":"message","role":"user","content":[{"type":"input_text","text":"added after resume"}]
++        }))
++        .unwrap();
++        restored
++            .history
++            .record_items([&fresh], TruncationPolicy::Tokens(10_000));
++        let after = restored
++            .history
++            .estimate_token_count_with_base_instructions(&BaseInstructions::default())
++            .unwrap();
++        assert_eq!(
++            restored.get_total_token_usage(),
++            baseline + after - estimate
++        );
++    }
++}
++
+ #[tokio::test]
+ async fn record_token_usage_continues_restored_totals() {
+     let thread_id = ThreadId::new();
+diff --git a/codex-rs/external-agent-migration/src/sessions/export.rs b/codex-rs/external-agent-migration/src/sessions/export.rs
+index 3900ea1293..a36c6109a4 100644
+--- a/codex-rs/external-agent-migration/src/sessions/export.rs
++++ b/codex-rs/external-agent-migration/src/sessions/export.rs
+@@ -198,6 +198,7 @@ fn token_count_item(last_model_visible_tokens: i64) -> RolloutItem {
+         ..TokenUsage::default()
+     };
+     RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++        accounting: None,
+         info: Some(TokenUsageInfo {
+             total_token_usage: usage.clone(),
+             last_token_usage: usage,
+diff --git a/codex-rs/history/src/rollout_payload.rs b/codex-rs/history/src/rollout_payload.rs
+index 370e8c8c82..f931bcbd10 100644
+--- a/codex-rs/history/src/rollout_payload.rs
++++ b/codex-rs/history/src/rollout_payload.rs
+@@ -19,6 +19,7 @@ use crate::RetainedUserMessage;
+ use codex_protocol::ResponseItemId;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
++use codex_protocol::protocol::TokenUsageAccounting;
+ use schemars::JsonSchema;
+ use serde::Deserialize;
+ use serde::Serialize;
+@@ -65,6 +66,9 @@ pub(super) enum RolloutItemWire<'a> {
+     },
+     EventMsg {
+         payload: Cow<'a, EventMsg>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[schemars(skip)]
++        accounting: Option<Cow<'a, TokenUsageAccounting>>,
+     },
+     RealtimeItem {
+         payload: Cow<'a, RealtimeItem>,
+@@ -155,6 +159,10 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
+             },
+             RolloutItem::EventMsg(payload) => Self::EventMsg {
+                 payload: Cow::Borrowed(payload),
++                accounting: match payload {
++                    EventMsg::TokenCount(event) => event.accounting.as_ref().map(Cow::Borrowed),
++                    _ => None,
++                },
+             },
+             RolloutItem::RealtimeItem(payload) => Self::RealtimeItem {
+                 payload: Cow::Borrowed(payload),
+@@ -234,7 +242,21 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
+             RolloutItemWire::SecurityRiskScore { payload } => {
+                 Self::SecurityRiskScore(payload.into_owned())
+             }
+-            RolloutItemWire::EventMsg { payload } => Self::EventMsg(payload.into_owned()),
++            RolloutItemWire::EventMsg {
++                payload,
++                accounting,
++            } => {
++                let mut payload = payload.into_owned();
++                if let EventMsg::TokenCount(event) = &mut payload {
++                    event.accounting = accounting.map(Cow::into_owned);
++                } else {
++                    assert!(
++                        accounting.is_none(),
++                        "accounting belongs to token-count records"
++                    );
++                }
++                Self::EventMsg(payload)
++            }
+             RolloutItemWire::RealtimeItem { payload } => Self::RealtimeItem(payload.into_owned()),
+         }
+     }
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index 50c32e3e64..59bbb61001 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -439,10 +439,9 @@ impl CodexErr {
+             | CodexErrorDetails::CyberPolicy { .. }
+             | CodexErrorDetails::BioPolicy { .. }
+             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => None,
+-            CodexErrorDetails::ServerOverloaded | CodexErrorDetails::RetryLimit(_) => {
+-                self.server_retry_delay()
+-            }
+-            CodexErrorDetails::Stream(..)
++            CodexErrorDetails::RetryLimit(_) => self.server_retry_delay(),
++            CodexErrorDetails::ServerOverloaded
++            | CodexErrorDetails::Stream(..)
+             | CodexErrorDetails::ContentFilter
+             | CodexErrorDetails::RateLimitExceeded(_)
+             | CodexErrorDetails::Timeout
+diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
+index 8fb8ae872d..d58e9a9113 100644
+--- a/codex-rs/protocol/src/error_tests.rs
++++ b/codex-rs/protocol/src/error_tests.rs
+@@ -39,7 +39,7 @@ async fn codex_err_debug_preserves_legacy_shape() {
+ #[test]
+ fn retryability_preserves_error_details_distinctions() {
+     let errors = [
+-        (CodexErr::ServerOverloaded, false),
++        (CodexErr::ServerOverloaded, true),
+         (CodexErr::new(CodexErrorDetails::ContentFilter), true),
+         (
+             CodexErr::new(CodexErrorDetails::RateLimitExceeded("retry later".into())),
+@@ -85,24 +85,25 @@ fn retryability_preserves_error_details_distinctions() {
+ /// make a terminal error retryable.
+ #[test]
+ fn retry_delay_distinguishes_server_advice_backoff_and_terminal_errors() {
+-    let error = CodexErr::InternalServerError;
+-    for (retry_count, expected_millis) in [(1, 180..220), (3, 720..880)] {
+-        let delay = error.retry_delay(retry_count).expect("retryable error");
+-        assert!(expected_millis.contains(&delay.as_millis()));
+-    }
+-    assert_eq!(error.server_retry_delay(), None);
+-
+     let advice = Duration::ZERO;
+     let retry_after = RetryAfter::from_delay(advice).expect("retry deadline");
+-    let error = error.with_retry_after(retry_after);
+-    assert_eq!(
+-        (
+-            error.retry_delay(/*retry_count*/ 1),
+-            error.retry_delay(/*retry_count*/ 3),
+-            error.server_retry_delay(),
+-        ),
+-        (Some(advice), Some(advice), Some(advice)),
+-    );
++    for error in [CodexErr::InternalServerError, CodexErr::ServerOverloaded] {
++        for (retry_count, expected_millis) in [(1, 180..220), (3, 720..880)] {
++            let delay = error.retry_delay(retry_count).expect("retryable error");
++            assert!(expected_millis.contains(&delay.as_millis()));
++        }
++        assert_eq!(error.server_retry_delay(), None);
++
++        let error = error.with_retry_after(retry_after);
++        assert_eq!(
++            (
++                error.retry_delay(/*retry_count*/ 1),
++                error.retry_delay(/*retry_count*/ 3),
++                error.server_retry_delay(),
++            ),
++            (Some(advice), Some(advice), Some(advice)),
++        );
++    }
+ 
+     let error = CodexErr::QuotaExceeded.with_retry_after(retry_after);
+     assert_eq!(
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index dc5c2a3bb4..47ea123fbd 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2472,6 +2472,19 @@ impl TokenUsageInfo {
+ pub struct TokenCountEvent {
+     pub info: Option<TokenUsageInfo>,
+     pub rate_limits: Option<RateLimitSnapshot>,
++    /// Local rollout accounting; never part of the client event payload.
++    #[serde(skip)]
++    #[schemars(skip)]
++    #[ts(skip)]
++    pub accounting: Option<TokenUsageAccounting>,
++}
++
++#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
++pub struct TokenUsageAccounting {
++    /// Discard older supplements that inferred exclusion from missing server metadata.
++    #[serde(default, rename = "confirmed_excluded_reasoning_tokens")]
++    pub non_last_reasoning_tokens: i64,
++    pub history_baseline_len: usize,
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
+index d42a7c4ba7..98cb7a8084 100644
+--- a/codex-rs/rollout/src/recorder_tests.rs
++++ b/codex-rs/rollout/src/recorder_tests.rs
+@@ -1107,6 +1107,7 @@ async fn resumed_paginated_rollout_continues_after_decimal_token_count() -> std:
+     recorder
+         .record_canonical_items(&[RolloutItem::EventMsg(EventMsg::TokenCount(
+             TokenCountEvent {
++                accounting: None,
+                 info: None,
+                 rate_limits: Some(RateLimitSnapshot {
+                     limit_id: None,
+diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
+index 5a96d13c58..eee3a56d52 100644
+--- a/codex-rs/state/src/runtime/threads.rs
++++ b/codex-rs/state/src/runtime/threads.rs
+@@ -3628,6 +3628,7 @@ mod tests {
+         );
+         let items = vec![RolloutItem::EventMsg(EventMsg::TokenCount(
+             codex_protocol::protocol::TokenCountEvent {
++                accounting: None,
+                 info: Some(codex_protocol::protocol::TokenUsageInfo {
+                     total_token_usage: codex_protocol::protocol::TokenUsage {
+                         input_tokens: 0,
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 17e58a6180..c43b5d53b0 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -1232,6 +1232,7 @@ mod tests {
+                 ),
+                 RolloutItem::EventMsg(EventMsg::TokenCount(
+                     codex_protocol::protocol::TokenCountEvent {
++                        accounting: None,
+                         info: None,
+                         rate_limits: None,
+                     },
+@@ -1359,6 +1360,7 @@ mod tests {
+         live_thread
+             .append_items(&[RolloutItem::EventMsg(EventMsg::TokenCount(
+                 codex_protocol::protocol::TokenCountEvent {
++                    accounting: None,
+                     info: None,
+                     rate_limits: None,
+                 },
+diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+index 213735805b..f0ae527ed4 100644
+--- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+@@ -1966,6 +1966,7 @@ async fn paginated_projection_accepts_float_rate_limits_and_later_final_answers(
+         .expect("rollout path");
+     let token_count = |primary: Option<f64>, secondary: Option<f64>| {
+         RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
++            accounting: None,
+             info: None,
+             rate_limits: Some(RateLimitSnapshot {
+                 limit_id: None,

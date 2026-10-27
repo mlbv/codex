@@ -48,6 +48,7 @@ pub use crate::common::ResponsesApiTools;
 pub use crate::common::ResponsesWsRequest;
 pub use crate::common::StreamOptions;
 pub use crate::common::TextControls;
+pub use crate::common::ToolChoice;
 pub use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
 pub use crate::common::WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY;
 pub use crate::common::create_text_param_for_request;

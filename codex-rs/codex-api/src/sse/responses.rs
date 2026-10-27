@@ -375,6 +375,14 @@ pub fn process_responses_event(
                 }));
             }
         }
+        "response.function_call_arguments.delta" => {
+            if let (Some(delta), Some(item_id)) = (event.delta, event.item_id) {
+                return Ok(Some(ResponseEvent::FunctionCallArgumentsDelta {
+                    item_id,
+                    delta,
+                }));
+            }
+        }
         "response.reasoning_summary_text.delta" => {
             if let (Some(delta), Some(summary_index)) = (event.delta, event.summary_index) {
                 return Ok(Some(ResponseEvent::ReasoningSummaryDelta {
@@ -424,8 +432,9 @@ pub fn process_responses_event(
                         .get("incomplete_details")
                         .and_then(|details| details.get("reason"))
                         .and_then(Value::as_str)
+                        .map(str::to_string)
                 });
-                let reason = reason.unwrap_or("unknown");
+                let reason = reason.unwrap_or_else(|| "unknown".to_string());
                 if reason == "content_filter" {
                     return Err(ResponsesEventError::Api(ApiError::ContentFilter));
                 }
@@ -498,7 +507,6 @@ pub fn process_responses_event(
         | "response.content_part.added"
         | "response.content_part.done"
         | "response.custom_tool_call_input.done"
-        | "response.function_call_arguments.delta"
         | "response.function_call_arguments.done"
         | "response.in_progress"
         | "response.metadata"
@@ -645,7 +653,10 @@ async fn process_sse_with_treatment(
 
         match process_responses_event(event) {
             Ok(Some(event)) => {
-                let is_completed = matches!(event, ResponseEvent::Completed { .. });
+                let is_completed = matches!(
+                    event,
+                    ResponseEvent::Completed { .. } | ResponseEvent::Incomplete { .. }
+                );
                 if tx_event.send(Ok(event)).await.is_err() {
                     return;
                 }
@@ -1012,7 +1023,12 @@ mod tests {
                 delta,
             } if item_id == "ctc_1" && call_id == "call_1" && delta == "*** Begin"
         );
-        assert_matches!(&events[1], ResponseEvent::Completed { .. });
+        assert_matches!(
+            &events[1],
+            ResponseEvent::FunctionCallArgumentsDelta { item_id, delta }
+                if item_id == "fc_1" && delta == "{\"input\":\""
+        );
+        assert_matches!(&events[2], ResponseEvent::Completed { .. });
     }
 
     #[tokio::test]

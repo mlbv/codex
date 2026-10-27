@@ -104,6 +104,7 @@ members = [
     "rollout-trace",
     "rmcp-client",
     "responses-api-proxy",
+    "messages-api",
     "runtime-agent-instance",
     "response-debug-context",
     "sandboxing",
@@ -276,6 +277,7 @@ codex-protocol-test-support = { path = "protocol/tests/support" }
 codex-prompts = { path = "prompts" }
 codex-queue-extension = { path = "ext/queue" }
 codex-responses-api-proxy = { path = "responses-api-proxy" }
+codex-messages-api = { path = "messages-api" }
 codex-response-debug-context = { path = "response-debug-context" }
 codex-rmcp-client = { path = "rmcp-client" }
 codex-rollout = { path = "rollout" }

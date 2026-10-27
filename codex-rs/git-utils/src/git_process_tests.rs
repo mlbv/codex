@@ -1,10 +1,60 @@
+#[cfg(windows)]
+use super::run_git_command_with_timeout_output;
 use super::spawn_git_command;
 use super::wait_for_git_command_with_timeout_output;
 use pretty_assertions::assert_eq;
 #[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
+
+#[cfg(windows)]
+#[tokio::test]
+async fn git_probe_does_not_open_console_window() -> anyhow::Result<()> {
+    const TEST_NAME: &str = "git_process::tests::git_probe_does_not_open_console_window";
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+    if std::env::var_os("CODEX_GIT_CONSOLE_CHILD").is_some() {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        }
+        println!("console_window={}", unsafe {
+            !GetConsoleWindow().is_null()
+        });
+        return Ok(());
+    }
+
+    if std::env::var_os("CODEX_GIT_DETACHED_PARENT").is_none() {
+        let output = std::process::Command::new(std::env::current_exe()?)
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env("CODEX_GIT_DETACHED_PARENT", "1")
+            .creation_flags(DETACHED_PROCESS)
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "detached Git probe failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Ok(());
+    }
+
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env("CODEX_GIT_CONSOLE_CHILD", "1");
+    let output =
+        run_git_command_with_timeout_output(&mut command, Duration::from_secs(/*secs*/ 10))
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Git probe did not complete"))?;
+    anyhow::ensure!(output.status.success(), "Git probe failed");
+    let stdout = String::from_utf8(output.stdout)?;
+    anyhow::ensure!(stdout.contains("console_window=false"), "{stdout}");
+    Ok(())
+}
 
 #[derive(Clone, Copy)]
 enum GitWrapperLifetime {

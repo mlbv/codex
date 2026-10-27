@@ -314,7 +314,9 @@ fn response_item_contains_message_text(item: &ResponseItem, needle: &str) -> boo
         ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
             text.contains(needle)
         }
-        ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+        ContentItem::InputImage { .. }
+        | ContentItem::InputAudio { .. }
+        | ContentItem::InputFile { .. } => false,
     })
 }
 

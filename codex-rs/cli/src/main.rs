@@ -23,6 +23,7 @@ use codex_exec::Cli as ExecCli;
 use codex_exec::Command as ExecCommand;
 use codex_exec::ReviewArgs;
 use codex_execpolicy::ExecPolicyCheckCommand;
+use codex_messages_api::Args as MessagesApiArgs;
 use codex_responses_api_proxy::Args as ResponsesApiProxyArgs;
 use codex_rollout_trace::REDUCED_STATE_FILE_NAME;
 use codex_rollout_trace::replay_bundle;
@@ -237,6 +238,9 @@ enum Subcommand {
     /// Internal: run the responses API proxy.
     #[clap(hide = true)]
     ResponsesApiProxy(ResponsesApiProxyArgs),
+
+    /// [EXPERIMENTAL] Serve the Anthropic Messages API through this Codex login.
+    MessagesApi(MessagesApiArgs),
 
     /// Internal: relay stdio to a Unix domain socket.
     #[clap(hide = true, name = "stdio-to-uds")]
@@ -1891,6 +1895,15 @@ async fn cli_main(
             );
             run_apply_command(apply_cli, /*cwd*/ None).await?;
         }
+        Some(Subcommand::MessagesApi(mut args)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "messages-api",
+            )?;
+            prepend_config_flags(&mut args.config_overrides, root_config_overrides.clone());
+            codex_messages_api::run_main(args).await?;
+        }
         Some(Subcommand::ResponsesApiProxy(args)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2385,6 +2398,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Execpolicy(_)) => Some("execpolicy"),
         Some(Subcommand::Apply(_)) => Some("apply"),
         Some(Subcommand::ResponsesApiProxy(_)) => Some("responses-api-proxy"),
+        Some(Subcommand::MessagesApi(_)) => Some("messages-api"),
         Some(Subcommand::StdioToUds(_)) => Some("stdio-to-uds"),
         Some(Subcommand::Features(_)) => Some("features"),
         Some(Subcommand::TcpTunnel(_)) => Some("tcp-tunnel"),

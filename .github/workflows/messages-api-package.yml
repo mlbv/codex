@@ -1,0 +1,164 @@
+name: Build Messages API for Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Published release matching the running Codex version
+        required: true
+        type: string
+        default: rust-v0.164.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: messages-api-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    if: github.repository == 'mlbv/codex'
+    runs-on: windows-2025
+    timeout-minutes: 180
+    env:
+      UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      LIBSQLITE3_FLAGS: SQLITE_DISABLE_INTRINSIC
+      RUST_MIN_STACK: "8388608"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_IDLE_TIMEOUT: "0"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Resolve release identity and cache inputs
+        id: source
+        shell: pwsh
+        run: |
+          git fetch --no-tags https://github.com/openai/codex.git "refs/tags/$env:UPSTREAM_TAG"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          import hashlib
+          import os
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          import tomllib
+
+          tag = os.environ["UPSTREAM_TAG"]
+          version = tag.removeprefix("rust-v")
+          manifest = tomllib.loads(Path("codex-rs/Cargo.toml").read_text())
+          if manifest["workspace"]["package"]["version"] != version:
+              raise RuntimeError("Workspace version must match the selected published release")
+          parent = subprocess.check_output(["git", "rev-parse", "HEAD^"], text=True).strip()
+          upstream = subprocess.check_output(["git", "rev-parse", "FETCH_HEAD^{commit}"], text=True).strip()
+          if parent != upstream:
+              raise RuntimeError("The fork commit must be directly based on the selected release")
+          embedded = subprocess.check_output([
+              "git", "ls-files", "--stage", "-z", "--",
+              "codex-rs/skills/src/assets", ":(glob)codex-rs/state/*migrations/**",
+          ])
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+              print(f"EXPECTED_VERSION={version}", file=output)
+              print("SCCACHE_GHA_VERSION=messages-api-windows-nolto-v1-" + hashlib.sha256(embedded).hexdigest(), file=output)
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              print("v8-cache=" + str(Path(tempfile.gettempdir()) / "codex-package"), file=output)
+          '@ | python -
+
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${{ steps.source.outputs.v8-cache }}
+          key: messages-api-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: |
+            messages-api-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
+            daemon-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - uses: ./.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Install release toolchain
+        shell: pwsh
+        run: |
+          $channel = python -c "import tomllib; print(tomllib.load(open('codex-rs/rust-toolchain.toml', 'rb'))['toolchain']['channel'])"
+          rustup toolchain install $channel --profile minimal --no-self-update
+
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+
+      - name: Configure official V8 artifacts
+        shell: pwsh
+        run: |
+          @'
+          import os
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, "scripts")
+          from codex_package.targets import TARGET_SPECS
+          from codex_package.v8 import resolve_codex_v8_cargo_env
+          values = resolve_codex_v8_cargo_env(TARGET_SPECS["x86_64-pc-windows-msvc"])
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+              for name, value in values.items():
+                  print(f"{name}={value}", file=output)
+          '@ | python -
+
+      - name: Build release executable
+        working-directory: codex-rs
+        run: cargo build --locked --release --bin codex --target x86_64-pc-windows-msvc
+
+      - name: Package and check offline entry points
+        shell: pwsh
+        run: |
+          @'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          destination = Path("artifact")
+          destination.mkdir()
+          binary = destination / "codex.exe"
+          shutil.copy2("codex-rs/target/x86_64-pc-windows-msvc/release/codex.exe", binary)
+          reported = subprocess.check_output([str(binary.resolve()), "--version"], text=True).strip()
+          if reported != "codex-cli " + os.environ["EXPECTED_VERSION"]:
+              raise RuntimeError(f"Unexpected executable version: {reported}")
+          with (destination / "messages-api-help.txt").open("w", encoding="utf-8") as output:
+              subprocess.run([str(binary.resolve()), "messages-api", "--help"], check=True, stdout=output)
+          with binary.open("rb") as source:
+              digest = hashlib.file_digest(source, "sha256").hexdigest()
+          metadata = {
+              "version": os.environ["EXPECTED_VERSION"],
+              "upstream_tag": os.environ["UPSTREAM_TAG"],
+              "source_commit": os.environ["GITHUB_SHA"],
+              "target": "x86_64-pc-windows-msvc",
+              "release_lto": os.environ["CARGO_PROFILE_RELEASE_LTO"],
+              "binary_sha256": digest,
+          }
+          (destination / "build.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+          '@ | python -
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-messages-api-${{ env.EXPECTED_VERSION }}-windows
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 7

@@ -1124,6 +1124,23 @@ class InputAudioContentItem(BaseModel):
     type: Annotated[Literal["input_audio"], Field(title="InputAudioContentItemType")]
 
 
+class InputFileContentItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["input_file"], Field(title="InputFileContentItemType")]
+    file_data: str
+    filename: str
+
+
+class FileUrlContentItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["input_file"], Field(title="InputFileContentItemType")]
+    file_url: str
+
+
 class OutputTextContentItem(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -1775,6 +1792,27 @@ class InputAudioFunctionCallOutputContentItem(BaseModel):
     type: Annotated[
         Literal["input_audio"], Field(title="InputAudioFunctionCallOutputContentItemType")
     ]
+
+
+class InputFileFunctionCallOutputContentItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[
+        Literal["input_file"], Field(title="InputFileFunctionCallOutputContentItemType")
+    ]
+    file_data: str
+    filename: str
+
+
+class FileUrlFunctionCallOutputContentItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[
+        Literal["input_file"], Field(title="InputFileFunctionCallOutputContentItemType")
+    ]
+    file_url: str
 
 
 class EncryptedContentFunctionCallOutputContentItem(BaseModel):
@@ -8209,6 +8247,8 @@ class ContentItem(
         | InputImageContentItem
         | FileIdContentItem
         | InputAudioContentItem
+        | InputFileContentItem
+        | FileUrlContentItem
         | OutputTextContentItem
     ]
 ):
@@ -8220,6 +8260,8 @@ class ContentItem(
         | InputImageContentItem
         | FileIdContentItem
         | InputAudioContentItem
+        | InputFileContentItem
+        | FileUrlContentItem
         | OutputTextContentItem
     )
 
@@ -8460,6 +8502,8 @@ class FunctionCallOutputContentItem(
         | InputImageFunctionCallOutputContentItem
         | FileIdFunctionCallOutputContentItem
         | InputAudioFunctionCallOutputContentItem
+        | InputFileFunctionCallOutputContentItem
+        | FileUrlFunctionCallOutputContentItem
         | EncryptedContentFunctionCallOutputContentItem
     ]
 ):
@@ -8471,6 +8515,8 @@ class FunctionCallOutputContentItem(
         | InputImageFunctionCallOutputContentItem
         | FileIdFunctionCallOutputContentItem
         | InputAudioFunctionCallOutputContentItem
+        | InputFileFunctionCallOutputContentItem
+        | FileUrlFunctionCallOutputContentItem
         | EncryptedContentFunctionCallOutputContentItem,
         Field(
             description="Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs."

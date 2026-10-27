@@ -579,7 +579,7 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
                 }
             },
             ContentItem::InputAudio { audio_url } => audio.push(audio_url.as_str()),
-            ContentItem::OutputText { .. } => return false,
+            ContentItem::InputFile { .. } | ContentItem::OutputText { .. } => return false,
         }
     }
     text == event.message
