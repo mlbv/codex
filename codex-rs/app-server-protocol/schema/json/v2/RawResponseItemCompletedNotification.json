@@ -152,6 +152,52 @@
           "type": "object"
         },
         {
+          "anyOf": [
+            {
+              "properties": {
+                "file_data": {
+                  "type": "string"
+                },
+                "filename": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file_data",
+                "filename"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "file_url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file_url"
+              ],
+              "title": "FileUrlContentItem",
+              "type": "object"
+            }
+          ],
+          "description": "An `input_file` document. Inline data must carry a filename.",
+          "properties": {
+            "type": {
+              "enum": [
+                "input_file"
+              ],
+              "title": "InputFileContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "InputFileContentItem",
+          "type": "object"
+        },
+        {
           "properties": {
             "annotations": {
               "items": true,
@@ -293,6 +339,52 @@
             "type"
           ],
           "title": "InputAudioFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "file_data": {
+                  "type": "string"
+                },
+                "filename": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file_data",
+                "filename"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "file_url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file_url"
+              ],
+              "title": "FileUrlFunctionCallOutputContentItem",
+              "type": "object"
+            }
+          ],
+          "description": "An `input_file` document. Inline data must carry a filename.",
+          "properties": {
+            "type": {
+              "enum": [
+                "input_file"
+              ],
+              "title": "InputFileFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "InputFileFunctionCallOutputContentItem",
           "type": "object"
         },
         {

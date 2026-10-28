@@ -1398,8 +1398,10 @@ impl SessionTelemetry {
                 SessionTelemetry::responses_item_type(item)
             }
             ResponseEvent::Completed { .. } => "completed".into(),
+            ResponseEvent::Incomplete { .. } => "incomplete".into(),
             ResponseEvent::OutputTextDelta(_) => "text_delta".into(),
             ResponseEvent::ToolCallInputDelta { .. } => "tool_input_delta".into(),
+            ResponseEvent::FunctionCallArgumentsDelta { .. } => "function_arguments_delta".into(),
             ResponseEvent::ReasoningSummaryDelta { .. } => "reasoning_summary_delta".into(),
             ResponseEvent::ReasoningSummaryDone { .. } => "reasoning_summary_done".into(),
             ResponseEvent::ReasoningContentDelta { .. } => "reasoning_content_delta".into(),

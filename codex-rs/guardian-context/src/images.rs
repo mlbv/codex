@@ -142,6 +142,7 @@ impl TranscriptImages {
                             }
                             ContentItem::InputText { .. }
                             | ContentItem::InputAudio { .. }
+                            | ContentItem::InputFile { .. }
                             | ContentItem::OutputText { .. } => {}
                         }
                     }
@@ -158,6 +159,7 @@ impl TranscriptImages {
                                 }
                                 FunctionCallOutputContentItem::InputText { .. }
                                 | FunctionCallOutputContentItem::InputAudio { .. }
+                                | FunctionCallOutputContentItem::InputFile { .. }
                                 | FunctionCallOutputContentItem::EncryptedContent { .. } => {}
                             }
                         }
@@ -179,6 +181,7 @@ impl TranscriptImages {
                     }
                     | ContentItem::InputText { .. }
                     | ContentItem::InputAudio { .. }
+                    | ContentItem::InputFile { .. }
                     | ContentItem::OutputText { .. } => {}
                 }
             }

@@ -559,7 +559,9 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
                     pieces.push(text.as_str());
                 }
             }
-            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}
+            ContentItem::InputImage { .. }
+            | ContentItem::InputAudio { .. }
+            | ContentItem::InputFile { .. } => {}
         }
     }
     if pieces.is_empty() {

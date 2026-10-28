@@ -1184,6 +1184,7 @@ mod tests {
                                 ContentItem::InputText { text } => text.as_str(),
                                 ContentItem::InputImage { .. }
                                 | ContentItem::InputAudio { .. }
+                                | ContentItem::InputFile { .. }
                                 | ContentItem::OutputText { .. } => {
                                     panic!("expected input text content, got {item:?}")
                                 }

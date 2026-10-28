@@ -455,7 +455,7 @@ impl PreparedMcpCall {
     }
 }
 
-pub(crate) fn call_tool_result_from_rmcp(result: rmcp::model::CallToolResult) -> CallToolResult {
+pub fn call_tool_result_from_rmcp(result: rmcp::model::CallToolResult) -> CallToolResult {
     let content = result
         .content
         .into_iter()

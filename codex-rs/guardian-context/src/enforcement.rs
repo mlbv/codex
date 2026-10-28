@@ -399,6 +399,7 @@ fn retain_content(
                     ..
                 }) => 0,
                 SectionContent::Other(ContentItem::InputAudio { audio_url }) => audio_url.len(),
+                SectionContent::Other(ContentItem::InputFile { file }) => file.payload_len(),
             };
             truncations.push(TruncationObservation {
                 component: section.id,

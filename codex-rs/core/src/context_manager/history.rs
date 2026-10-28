@@ -1111,6 +1111,9 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
                     estimate_image_reference_bytes(image, *detail)
                 }
                 ContentItem::InputAudio { audio_url } => estimate_audio_bytes(audio_url),
+                ContentItem::InputFile { file } => {
+                    i64::try_from(file.payload_len()).unwrap_or(i64::MAX)
+                }
             })
             .fold(0i64, i64::saturating_add),
         ResponseItem::AgentMessage {
@@ -1335,6 +1338,9 @@ fn estimate_function_output_bytes(output: &FunctionCallOutputBody) -> i64 {
                 }
                 FunctionCallOutputContentItem::InputAudio { audio_url } => {
                     estimate_audio_bytes(audio_url)
+                }
+                FunctionCallOutputContentItem::InputFile { file } => {
+                    i64::try_from(file.payload_len()).unwrap_or(i64::MAX)
                 }
                 FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
                     i64::try_from(estimate_encrypted_function_output_length(

@@ -355,7 +355,7 @@ fn content_item_text(item: &ContentItem) -> Option<&str> {
         ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
             Some(text.as_str())
         }
-        ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
+        ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } | ContentItem::InputFile { .. } => None,
     }
 }
 

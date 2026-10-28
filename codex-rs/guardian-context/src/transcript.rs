@@ -160,7 +160,8 @@ pub fn collect_transcript(
                         ContentItem::InputText { .. }
                         | ContentItem::OutputText { .. }
                         | ContentItem::InputImage { .. }
-                        | ContentItem::InputAudio { .. } => None,
+                        | ContentItem::InputAudio { .. }
+                        | ContentItem::InputFile { .. } => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");

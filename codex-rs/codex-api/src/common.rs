@@ -105,10 +105,20 @@ pub enum ResponseEvent {
         /// so we rely on fallback logic when this is `None`.
         end_turn: Option<bool>,
     },
+    /// `response.incomplete` at `max_output_tokens`; terminal like `Completed`.
+    Incomplete {
+        response_id: String,
+        token_usage: Option<TokenUsage>,
+        reason: String,
+    },
     OutputTextDelta(String),
     ToolCallInputDelta {
         item_id: String,
         call_id: Option<String>,
+        delta: String,
+    },
+    FunctionCallArgumentsDelta {
+        item_id: String,
         delta: String,
     },
     ReasoningSummaryDelta {
@@ -275,6 +285,34 @@ impl Serialize for ResponsesApiTools {
     }
 }
 
+/// Responses `tool_choice`. A forced function must be top-level: the API has no namespace form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    None,
+    Required,
+    Function {
+        name: String,
+    },
+}
+
+impl Serialize for ToolChoice {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::None => serializer.serialize_str("none"),
+            Self::Required => serializer.serialize_str("required"),
+            Self::Function { name } => {
+                serde_json::json!({ "type": "function", "name": name }).serialize(serializer)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct ResponsesApiRequest {
     // Keep routing fields first: serde serializes struct fields in declaration order, and
@@ -286,9 +324,11 @@ pub struct ResponsesApiRequest {
     pub input: Vec<ResponseItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<ResponsesApiTools>,
-    pub tool_choice: String,
+    pub tool_choice: ToolChoice,
     pub parallel_tool_calls: bool,
     pub reasoning: Option<Reasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     pub store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
@@ -313,6 +353,7 @@ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
             tool_choice: &request.tool_choice,
             parallel_tool_calls: request.parallel_tool_calls,
             reasoning: request.reasoning.as_ref(),
+            max_output_tokens: request.max_output_tokens,
             store: request.store,
             stream: request.stream,
             stream_options: request.stream_options.as_ref(),
@@ -340,9 +381,11 @@ pub struct ResponseCreateWsRequest<'a> {
     pub input: &'a [ResponseItem],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<&'a RawValue>,
-    pub tool_choice: &'a str,
+    pub tool_choice: &'a ToolChoice,
     pub parallel_tool_calls: bool,
     pub reasoning: Option<&'a Reasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
     pub store: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<&'a StreamOptions>,

@@ -137,6 +137,11 @@ pub(crate) fn serialize_tiered_input(
                             text: "[audio omitted]".into(),
                         };
                     }
+                    ContentItem::InputFile { .. } => {
+                        *part = ContentItem::InputText {
+                            text: "[file omitted]".into(),
+                        };
+                    }
                     ContentItem::InputText { .. } | ContentItem::OutputText { .. } => {}
                 }
             }

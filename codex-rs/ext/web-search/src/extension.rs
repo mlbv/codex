@@ -19,11 +19,11 @@ use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolContributor;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
-use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::config_types::WebSearchContextSize;
 use codex_protocol::config_types::WebSearchMode;
 
+use crate::search::StandaloneSearch;
 use crate::tool::WebSearchTool;
 
 #[derive(Clone)]
@@ -32,11 +32,11 @@ struct WebSearchExtension {
 }
 
 #[derive(Clone)]
-struct WebSearchExtensionConfig {
-    available: bool,
-    http_client_factory: HttpClientFactory,
-    provider: ModelProviderInfo,
-    settings: SearchSettings,
+pub(crate) struct WebSearchExtensionConfig {
+    pub(crate) available: bool,
+    pub(crate) http_client_factory: HttpClientFactory,
+    pub(crate) provider: ModelProviderInfo,
+    pub(crate) settings: SearchSettings,
 }
 
 impl From<&Config> for WebSearchExtensionConfig {
@@ -136,12 +136,7 @@ impl ToolContributor for WebSearchExtension {
 
         vec![Arc::new(WebSearchTool {
             session_id: session_store.level_id().to_string(),
-            http_client_factory: config.http_client_factory.clone(),
-            provider: create_model_provider(
-                config.provider.clone(),
-                Some(self.auth_manager.clone()),
-            ),
-            settings: config.settings.clone(),
+            search: StandaloneSearch::new(&config, self.auth_manager.clone()),
             originator: thread_store
                 .get::<ThreadOriginator>()
                 .map(|originator| originator.0.clone()),
@@ -172,8 +167,8 @@ mod tests {
     use super::WebSearchExtensionConfig;
     use super::external_web_access_for_mode;
     use super::install;
-    use crate::tool::RUN_TOOL_NAME;
-    use crate::tool::WEB_NAMESPACE;
+    use crate::search::RUN_TOOL_NAME;
+    use crate::search::WEB_NAMESPACE;
     use codex_api::ExternalWebAccess;
     use codex_api::ExternalWebAccessMode;
     use codex_protocol::config_types::WebSearchMode;

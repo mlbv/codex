@@ -57,12 +57,12 @@ use sha2::Digest;
 use sha2::Sha256;
 
 use crate::IMAGE_GEN_NAMESPACE;
+use crate::IMAGE_MODEL;
 use crate::IMAGEGEN_TOOL_NAME;
 use crate::artifact::image_generation_artifact_path;
 use crate::artifact::image_generation_output_hint;
 use crate::backend::CodexImagesBackend;
 
-const IMAGE_MODEL: &str = "gpt-image-2";
 const MAX_EDIT_IMAGES: usize = 5;
 const MAX_EXECUTOR_GENERATED_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_EXECUTOR_GENERATED_IMAGE_BASE64_BYTES: usize =
@@ -575,6 +575,7 @@ fn recent_images(
                     ContentItem::InputImage { image, .. } => Some(image.clone()),
                     ContentItem::InputText { .. }
                     | ContentItem::InputAudio { .. }
+                    | ContentItem::InputFile { .. }
                     | ContentItem::OutputText { .. } => None,
                 }));
             }
@@ -631,6 +632,7 @@ fn output_images(output: &FunctionCallOutputPayload) -> impl Iterator<Item = &Im
             FunctionCallOutputContentItem::InputImage { image, .. } => Some(image),
             FunctionCallOutputContentItem::InputText { .. }
             | FunctionCallOutputContentItem::InputAudio { .. }
+            | FunctionCallOutputContentItem::InputFile { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
         })
 }

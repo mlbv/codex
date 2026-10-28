@@ -1314,7 +1314,7 @@ impl Session {
     /// `ModelClient` is session-scoped and intentionally does not depend on the full `Config`, so
     /// we precompute the comma-separated list of enabled experimental feature keys at session
     /// creation time and thread it into the client. Remote compaction stays advertised unconditionally.
-    fn build_model_client_beta_features_header(config: &Config) -> Option<String> {
+    pub(crate) fn build_model_client_beta_features_header(config: &Config) -> Option<String> {
         Some(
             FEATURES
                 .iter()
@@ -3692,6 +3692,7 @@ impl Session {
                             }
                             ContentItem::InputImage { .. } => "user.image",
                             ContentItem::InputAudio { .. } => "user.audio",
+                            ContentItem::InputFile { .. } => "user.file",
                         }
                         .to_string(),
                     )
@@ -4071,6 +4072,9 @@ impl Session {
             }
             let extension_data =
                 codex_extension_api::ExtensionData::new(turn_context.sub_id.clone());
+            if let Some(snapshots) = &executor_capability_discovery_v2 {
+                extension_data.insert(snapshots.clone());
+            }
             if let Some(messages) = settings
                 .model_info
                 .model_messages

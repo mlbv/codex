@@ -1036,6 +1036,7 @@ mod tests {
     use super::*;
     use crate::common::ResponseCreateWsRequest;
     use crate::common::ResponsesApiRequest;
+    use crate::common::ToolChoice;
     use codex_protocol::ResponseItemId;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
@@ -1073,9 +1074,10 @@ mod tests {
                 )
                 .into(),
             ),
-            tool_choice: "auto".to_string(),
+            tool_choice: ToolChoice::Auto,
             parallel_tool_calls: true,
             reasoning: None,
+            max_output_tokens: None,
             store: false,
             stream: true,
             stream_options: None,
