@@ -10,7 +10,9 @@ use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::session_prefix::format_guardian_interruption_message;
 use crate::session_prefix::format_inter_agent_completion_message;
+use codex_features::Feature;
 use codex_protocol::AgentPath;
+use codex_protocol::error::CodexErr;
 use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -20,11 +22,61 @@ use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::SubAgentSource;
 use codex_rollout_trace::AgentResultTracePayload;
 use codex_rollout_trace::ThreadTraceContext;
+use std::sync::Arc;
 use tracing::debug;
 
 impl LocalAgentControl {
     /// Routes a captured terminal outcome without retaining the child's live turn context.
     pub(crate) async fn notify_parent_of_terminal_turn(
+        &self,
+        outcome: AgentTurnOutcome,
+        trace: &ThreadTraceContext,
+    ) {
+        if matches!(&outcome.status, AgentStatus::Completed(_))
+            && let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            }) = &outcome.source
+            && let Ok(manager) = self.runtime.upgrade()
+            && let Ok(parent) = manager.get_thread(*parent_thread_id).await
+            && parent.session.enabled(Feature::ClaudeDelegation)
+            && let Some(parent_runtime) = crate::claude_code::session_runtime(&parent.session)
+            && let Ok(child) = manager.get_thread(outcome.thread_id).await
+            && let Some(child_runtime) = crate::claude_code::session_runtime(&child.session)
+        {
+            let owner = *parent_thread_id;
+            let residency = Arc::clone(&child.residency_gate).read_owned().await;
+            let control = self.clone();
+            let trace = trace.clone();
+            let waiting = child_runtime.clone();
+            let watcher = tokio::spawn(async move {
+                let _residency = residency;
+                if !matches!(
+                    crate::claude_code::events::wait_until_idle(
+                        &waiting,
+                        &parent_runtime.cancellation,
+                    )
+                    .await,
+                    Ok(AgentStatus::Completed(_))
+                ) {
+                    return;
+                }
+                // A completion from a yielded turn is superseded by its resumed turn.
+                if !child
+                    .session
+                    .is_latest_started_turn(&outcome.turn_id)
+                    .await
+                {
+                    return;
+                }
+                control.notify_parent_of_settled_turn(outcome, &trace).await;
+            });
+            child_runtime.delegation.watch(owner, watcher).await;
+            return;
+        }
+        self.notify_parent_of_settled_turn(outcome, trace).await;
+    }
+
+    async fn notify_parent_of_settled_turn(
         &self,
         outcome: AgentTurnOutcome,
         trace: &ThreadTraceContext,
@@ -39,6 +91,14 @@ impl LocalAgentControl {
         };
         let parent_thread_id = *parent_thread_id;
         let status = outcome.status;
+        let parent_runtime = if let Ok(manager) = self.runtime.upgrade()
+            && let Ok(parent) = manager.get_thread(parent_thread_id).await
+            && parent.session.enabled(Feature::ClaudeDelegation)
+        {
+            crate::claude_code::session_runtime(&parent.session)
+        } else {
+            None
+        };
         let Some(parent_agent_path) = child_agent_path
             .as_str()
             .rsplit_once('/')
@@ -89,6 +149,12 @@ impl LocalAgentControl {
             }
         }
 
+        if let Some(runtime) = &parent_runtime
+            && !runtime.delegation.reports_result(outcome.thread_id).await
+        {
+            return;
+        }
+
         let message = match (&status, outcome.error_info) {
             (AgentStatus::Errored(error), Some(CodexErrorInfo::TooManyDenials)) => {
                 Some(format_guardian_interruption_message(
@@ -118,14 +184,22 @@ impl LocalAgentControl {
         );
         let context =
             AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id);
-        let delivery = self
-            .send_inter_agent_communication(
+        let delivery = if let Some(runtime) = parent_runtime {
+            runtime
+                .events
+                .emit("agent_result", communication.content.clone())
+                .await
+                .map(|()| outcome.turn_id.clone())
+                .map_err(|error| CodexErr::InvalidRequest(error.to_string()))
+        } else {
+            self.send_inter_agent_communication(
                 parent_thread_id,
                 communication,
                 context,
                 TurnStartOptions::default(),
             )
-            .await;
+            .await
+        };
         if let Some(metrics) = codex_otel::global() {
             let _ = metrics.counter(
                 "codex.multi_agent.result_delivery",

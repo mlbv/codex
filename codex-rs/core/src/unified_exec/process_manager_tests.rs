@@ -369,7 +369,8 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
             output_buffer
                 .lock()
                 .await
-                .push_chunk(ExecOutputStream::Stdout, chunk);
+                .push_chunk(ExecOutputStream::Stdout, chunk)
+                .await;
             output_notify.notify_one();
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
@@ -401,8 +402,12 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
 #[tokio::test]
 async fn output_collection_preserves_omissions_from_drained_buffer() {
     let mut buffered_output = OutputBuffers::<10>::default();
-    buffered_output.push_chunk(ExecOutputStream::Stdout, &[b'a'; 10]);
-    buffered_output.push_chunk(ExecOutputStream::Stdout, b"overflow");
+    buffered_output
+        .push_chunk(ExecOutputStream::Stdout, &[b'a'; 10])
+        .await;
+    buffered_output
+        .push_chunk(ExecOutputStream::Stdout, b"overflow")
+        .await;
     let mut expected = HeadTailBuffer::<10>::default();
     expected.push_chunk(&[b'a'; 10]);
     expected.push_chunk(b"overflow");
@@ -486,7 +491,8 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
     output_buffer
         .lock()
         .await
-        .push_chunk(ExecOutputStream::Stdout, b"PARTIAL_TRANSCRIPT");
+        .push_chunk(ExecOutputStream::Stdout, b"PARTIAL_TRANSCRIPT")
+        .await;
 
     emit_failed_initial_exec_end_if_unstored(
         /*process_stored*/ false,

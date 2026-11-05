@@ -43,6 +43,9 @@ mod model_info_overrides_tests;
 #[path = "catalog_origin_tests.rs"]
 mod catalog_origin_tests;
 
+#[path = "upstream_changes_tests.rs"]
+mod upstream_changes_tests;
+
 const DEFAULT_HTTP_CLIENT_FACTORY: HttpClientFactory =
     HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
 

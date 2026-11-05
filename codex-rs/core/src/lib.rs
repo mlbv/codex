@@ -143,6 +143,7 @@ mod skills;
 pub(crate) use skills::maybe_emit_implicit_skill_invocation;
 #[cfg(test)]
 pub(crate) use skills::skills_load_input_from_config;
+pub mod claude_code;
 mod stream_events_utils;
 pub mod test_support;
 mod unified_exec;

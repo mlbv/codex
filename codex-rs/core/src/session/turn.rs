@@ -2817,7 +2817,8 @@ async fn try_run_sampling_request(
     let mut pending_assessment: Option<codex_api::GuardianAssessment> = None;
     let mut response_completed = false;
     let mut request_token_usage = None;
-    let mut includes_reasoning = step_context.settings.model_info.use_responses_lite;
+    // Absent coverage metadata must not add an unproven reasoning supplement.
+    let mut includes_reasoning = true;
     // Catalog policies can enable adaptive review independently of the legacy scorer flag.
     // Capture evidence whenever Guardian is available; the reviewer resolves the policy.
     let assessment_authorization = if turn_context

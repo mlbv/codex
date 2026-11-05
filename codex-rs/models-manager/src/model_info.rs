@@ -3,7 +3,9 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelMessages;
+use codex_protocol::openai_models::ModelOrigin;
 use codex_protocol::openai_models::ModelVisibility;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::TruncationMode;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::WebSearchToolType;
@@ -11,12 +13,23 @@ use codex_protocol::openai_models::default_input_modalities;
 
 use crate::config::ModelsManagerConfig;
 use codex_utils_output_truncation::approx_bytes_for_tokens;
+use std::ops::Range;
+use std::sync::LazyLock;
 use tracing::warn;
 
 pub const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
-const PERSONALITY_SECTION_HEADER: &str = "# Personality";
+static BUNDLED_MODELS: LazyLock<ModelsResponse> =
+    LazyLock::new(|| crate::bundled_models_response().unwrap());
 
-pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig) -> ModelInfo {
+pub fn with_config_overrides(model: ModelInfo, config: &ModelsManagerConfig) -> ModelInfo {
+    with_config_overrides_for_origin(model, ModelOrigin::Provider, config)
+}
+
+pub(crate) fn with_config_overrides_for_origin(
+    mut model: ModelInfo,
+    origin: ModelOrigin,
+    config: &ModelsManagerConfig,
+) -> ModelInfo {
     if let Some(context_window) = config.model_context_window {
         model.context_window = Some(
             model
@@ -43,6 +56,36 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
         };
     }
 
+    if config.model_catalog.is_none()
+        && origin != ModelOrigin::Synthetic
+        && let Some(bundled) = bundled_model(&model.slug)
+    {
+        model.default_verbosity = bundled.default_verbosity;
+        if config.base_instructions.is_none()
+            && let Some(bundled_template) = bundled
+                .model_messages
+                .as_ref()
+                .and_then(|messages| messages.instructions_template.as_ref())
+        {
+            let instructions = model
+                .model_messages
+                .get_or_insert_default()
+                .instructions_template
+                .get_or_insert_with(|| bundled_template.clone());
+            if let Some(bundled_range) = personality_section_range(bundled_template) {
+                let personality = &bundled_template[bundled_range];
+                if let Some(provider_range) = personality_section_range(instructions) {
+                    instructions.replace_range(provider_range, personality);
+                } else {
+                    if !instructions.is_empty() && !instructions.ends_with('\n') {
+                        instructions.push('\n');
+                    }
+                    instructions.push_str(personality);
+                }
+            }
+        }
+    }
+
     if let Some(base_instructions) = &config.base_instructions {
         let model_messages = model.model_messages.get_or_insert_default();
         model_messages.instructions_template = Some(base_instructions.clone());
@@ -58,9 +101,18 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
     model
 }
 
-fn strip_personality_section(mut instructions: String) -> String {
+fn bundled_model(slug: &str) -> Option<&'static ModelInfo> {
+    let slug = slug.rsplit('/').next().unwrap();
+    BUNDLED_MODELS
+        .models
+        .iter()
+        .filter(|model| slug.starts_with(&model.slug))
+        .max_by_key(|model| model.slug.len())
+}
+
+fn personality_section_range(instructions: &str) -> Option<Range<usize>> {
     let mut section_start = None;
-    let mut section_end = None;
+    let mut section_level = 0;
     let mut offset = 0;
 
     for line_with_ending in instructions.split_inclusive('\n') {
@@ -69,21 +121,25 @@ fn strip_personality_section(mut instructions: String) -> String {
             None => line_with_ending,
         };
         if section_start.is_some() {
-            if is_h1_heading(line) {
-                section_end = Some(offset);
-                break;
+            if is_h1_heading(line)
+                || (section_level == 2 && line.strip_prefix('#').is_some_and(is_h1_heading))
+            {
+                return Some(section_start.unwrap()..offset);
             }
-        } else if line == PERSONALITY_SECTION_HEADER {
+        } else if line == "# Personality" || line == "## Personality" {
             section_start = Some(offset);
+            section_level = line.bytes().take_while(|byte| *byte == b'#').count();
         }
         offset += line_with_ending.len();
     }
 
-    if let Some(section_start) = section_start {
-        let section_end = section_end.unwrap_or(instructions.len());
-        instructions.replace_range(section_start..section_end, "");
-    }
+    section_start.map(|start| start..instructions.len())
+}
 
+fn strip_personality_section(mut instructions: String) -> String {
+    if let Some(range) = personality_section_range(&instructions) {
+        instructions.replace_range(range, "");
+    }
     instructions
 }
 

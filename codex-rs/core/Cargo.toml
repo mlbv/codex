@@ -37,8 +37,11 @@ codex-diagnostics = { workspace = true }
 codex-direct-tool-timing = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-extension-api = { workspace = true }
+codex-websocket-client = { workspace = true }
+sha2 = { workspace = true }
 codex-extension-items = { workspace = true }
 codex-features = { workspace = true }
+codex-file-watcher = { workspace = true }
 codex-feedback = { workspace = true }
 codex-file-system = { workspace = true }
 codex-login = { workspace = true }
@@ -181,8 +184,8 @@ walkdir = { workspace = true }
 wiremock = { workspace = true }
 zstd = { workspace = true }
 
-[target.'cfg(windows)'.dev-dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_Diagnostics_ToolHelp"] }
 
 [package.metadata.cargo-shear]
 ignored = ["openssl-sys"]

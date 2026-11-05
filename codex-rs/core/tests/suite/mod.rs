@@ -62,6 +62,7 @@ mod bedrock_multi_agent;
 #[path = "bedrock_service_tier_tests.rs"]
 mod bedrock_service_tier;
 mod catalog_permission_messages;
+mod claude_code;
 mod cli_stream;
 mod client;
 mod client_websockets;

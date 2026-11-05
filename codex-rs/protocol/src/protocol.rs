@@ -2583,6 +2583,22 @@ impl TokenUsageInfo {
 pub struct TokenCountEvent {
     pub info: Option<TokenUsageInfo>,
     pub rate_limits: Option<RateLimitSnapshot>,
+    /// Local rollout accounting; never part of the client event payload.
+    #[serde(skip)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub accounting: Option<TokenUsageAccounting>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TokenUsageAccounting {
+    /// Discard older supplements that inferred exclusion from missing server metadata.
+    #[serde(default, rename = "confirmed_excluded_reasoning_tokens")]
+    pub non_last_reasoning_tokens: i64,
+    /// Absolute number of history items covered by the reported usage.
+    /// The old `history_baseline_len` used a latest-model-output-relative boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_reported_usage_item_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]

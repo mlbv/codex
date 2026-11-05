@@ -944,7 +944,7 @@ fn non_last_reasoning_tokens_ignore_entries_after_last_user() {
     assert_eq!(history.get_non_last_reasoning_items_tokens(), 32);
 }
 
-#[test_case(None, 125; "legacy count")]
+#[test_case(None, 100; "legacy count")]
 #[test_case(Some(false), 125; "exclusive count")]
 #[test_case(Some(true), 100; "inclusive count")]
 fn total_token_usage_respects_saved_reasoning_accounting(
@@ -961,15 +961,26 @@ fn total_token_usage_respects_saved_reasoning_accounting(
         total_tokens: 100,
         ..Default::default()
     };
+    if let Some(included) = includes_reasoning {
+        history.update_token_info(
+            &usage,
+            /*model_context_window*/ None,
+            included,
+            /*input_item_count*/ 0,
+        );
+    }
     let mut saved = json!({ "last_token_usage": usage, "total_token_usage": usage });
     if let Some(included) = includes_reasoning {
         saved["last_usage_includes_reasoning"] = json!(included);
     }
-    history.set_token_info(Some(
-        serde_json::from_value(saved).expect("saved token count"),
-    ));
+    let saved: TokenUsageInfo = serde_json::from_value(saved).expect("saved token count");
+    let mut restored = create_history_with_items(raw_items(&history));
+    restored.restore_token_info(Some(saved.clone()), Some(history.token_usage_accounting()));
 
-    assert_eq!(history.get_total_token_usage(), expected);
+    assert_eq!(restored.get_total_token_usage(), expected);
+
+    restored.restore_token_info(Some(saved), None);
+    assert_eq!(restored.get_total_token_usage(), 100);
 }
 
 #[test]
@@ -1195,6 +1206,125 @@ fn legacy_inter_agent_assistant_messages_are_not_turn_boundaries() {
     assert!(!is_user_turn_boundary(&item));
 }
 
+#[test]
+fn total_token_usage_does_not_recount_reported_reasoning_when_user_turn_starts() {
+    for includes_reasoning in [false, true] {
+        let first_reasoning = reasoning_with_encrypted_content(2_000);
+        let mut history = create_history_with_items(vec![
+            user_msg("first"),
+            first_reasoning.clone(),
+            assistant_msg("first answer"),
+        ]);
+        history.update_token_info(
+            &TokenUsage {
+                input_tokens: 100,
+                output_tokens: 40,
+                total_tokens: 140,
+                ..Default::default()
+            },
+            None,
+            includes_reasoning,
+            /*input_item_count*/ 0,
+        );
+        let next_user = user_msg("second");
+        history.record_items([&next_user], TruncationPolicy::Tokens(10_000));
+        assert_eq!(
+            history.get_total_token_usage(),
+            140 + estimate_item_token_count(&next_user)
+        );
+        let mut restored = create_history_with_items(raw_items(&history));
+        restored.restore_token_info(history.token_info(), Some(history.token_usage_accounting()));
+        assert_eq!(
+            restored.get_total_token_usage(),
+            history.get_total_token_usage()
+        );
+        let legacy_accounting = serde_json::from_value(serde_json::json!({
+            "non_last_reasoning_tokens": 10_000,
+            "history_baseline_len": 0,
+        }))
+        .unwrap();
+        restored.restore_token_info(history.token_info(), Some(legacy_accounting));
+        assert_eq!(restored.get_total_token_usage(), 140);
+        restored.restore_token_info(history.token_info(), None);
+        assert_eq!(restored.get_total_token_usage(), 140);
+
+        let mut info = history.token_info().unwrap();
+        info.total_token_usage.total_tokens += 50;
+        history.set_token_info(Some(info));
+        assert_eq!(
+            history.get_total_token_usage(),
+            140 + estimate_item_token_count(&next_user)
+        );
+
+        history.record_items(
+            [
+                &reasoning_with_encrypted_content(3_000),
+                &assistant_msg("second answer"),
+            ],
+            TruncationPolicy::Tokens(10_000),
+        );
+        history.update_token_info(
+            &TokenUsage {
+                input_tokens: 200,
+                output_tokens: 60,
+                total_tokens: 260,
+                ..Default::default()
+            },
+            None,
+            includes_reasoning,
+            /*input_item_count*/ 0,
+        );
+        let expected = if !includes_reasoning {
+            260 + estimate_item_token_count(&first_reasoning)
+        } else {
+            260
+        };
+        assert_eq!(history.get_total_token_usage(), expected);
+        let third_user = user_msg("third");
+        history.record_items([&third_user], TruncationPolicy::Tokens(10_000));
+        assert_eq!(
+            history.get_total_token_usage(),
+            expected + estimate_item_token_count(&third_user)
+        );
+    }
+}
+
+#[test]
+fn total_token_usage_does_not_recount_reasoning_in_full_history_estimate() {
+    let mut history = create_history_with_items(vec![
+        user_msg("first"),
+        reasoning_with_encrypted_content(2_000),
+        assistant_msg("first answer"),
+        user_msg("second"),
+        assistant_msg("second answer"),
+        user_msg("already included in the local recount"),
+    ]);
+    history.update_token_info(
+        &TokenUsage {
+            total_tokens: 100,
+            ..Default::default()
+        },
+        Some(128_000),
+        /*includes_reasoning*/ false,
+        /*input_item_count*/ 0,
+    );
+    let estimate = history
+        .estimate_token_count_with_base_instructions(&BaseInstructions::default())
+        .unwrap();
+    let covered_item_count = history.raw_items().len();
+    history.set_token_estimate(estimate, None, covered_item_count);
+    assert_eq!(history.get_total_token_usage(), estimate);
+    let info = history.token_info().unwrap();
+    assert_eq!(info.total_token_usage.total_tokens, 100);
+    assert_eq!(info.model_context_window, Some(128_000));
+    let tool_output = custom_tool_call_output("new-tail", "added after the recount");
+    history.record_items([&tool_output], TruncationPolicy::Tokens(10_000));
+    assert_eq!(
+        history.get_total_token_usage(),
+        estimate + estimate_item_token_count(&tool_output)
+    );
+}
+
 #[test_case(false; "exclusive count")]
 #[test_case(true; "inclusive count")]
 fn total_token_usage_includes_all_items_since_last_usage(includes_reasoning: bool) {
@@ -1268,6 +1398,38 @@ fn total_token_usage_includes_all_items_since_last_usage(includes_reasoning: boo
         history.get_total_token_usage(),
         100 + prior_reasoning + estimate_item_token_count(&added_tool_output),
     );
+}
+
+#[test]
+fn total_token_usage_full_window_does_not_add_reasoning_or_covered_tail() {
+    let mut history = create_history_with_items(vec![
+        user_msg("first"),
+        reasoning_with_encrypted_content(2_000),
+        assistant_msg("first answer"),
+        user_msg("second"),
+        assistant_msg("second answer"),
+    ]);
+    history.update_token_info(
+        &TokenUsage {
+            total_tokens: 260,
+            ..Default::default()
+        },
+        None,
+        false,
+        /*input_item_count*/ 0,
+    );
+    assert!(history.get_total_token_usage() > 260);
+    history.record_items(
+        [&user_msg("already covered")],
+        TruncationPolicy::Tokens(10_000),
+    );
+    history.set_token_usage_full(128_000);
+    // Upstream fills cumulative usage and records the remaining amount as last usage.
+    assert_eq!(
+        history.token_info().unwrap().total_token_usage.total_tokens,
+        128_000
+    );
+    assert_eq!(history.get_total_token_usage(), 128_000 - 260);
 }
 
 /// Unavailable images become harness-attributed placeholders without changing saved history or

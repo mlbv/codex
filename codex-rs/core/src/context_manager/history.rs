@@ -62,6 +62,7 @@ use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TokenUsageAccounting;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::WorldStateItem;
@@ -124,6 +125,9 @@ pub(crate) struct ContextManager {
     last_server_reported_usage_item_count: usize,
     /// Index immediately after the latest model output, including failed responses.
     last_model_output_item_count: Option<usize>,
+    /// Past reasoning omitted from the input usage of the last completed response.
+    /// Keep this estimate tied to that response, even when another user turn starts.
+    non_last_reasoning_tokens: i64,
     /// Reference context snapshot used for diffing and producing model-visible
     /// settings update items.
     ///
@@ -261,6 +265,7 @@ impl ContextManager {
             token_info: None,
             last_server_reported_usage_item_count: 0,
             last_model_output_item_count: None,
+            non_last_reasoning_tokens: 0,
             reference_context_item: None,
             world_state_baseline: None,
         }
@@ -451,6 +456,11 @@ impl ContextManager {
     }
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
+        if self.token_info.as_ref().map(|info| &info.last_token_usage)
+            != info.as_ref().map(|info| &info.last_token_usage)
+        {
+            self.non_last_reasoning_tokens = 0;
+        }
         self.token_info = info;
     }
 
@@ -462,6 +472,63 @@ impl ContextManager {
     ) {
         self.last_server_reported_usage_item_count = covered_item_count;
         self.token_info = info;
+        self.non_last_reasoning_tokens = if self
+            .token_info
+            .as_ref()
+            .is_some_and(|info| info.last_usage_includes_reasoning == Some(false))
+        {
+            self.get_non_last_reasoning_items_tokens()
+        } else {
+            0
+        };
+    }
+
+    pub(crate) fn token_usage_accounting(&self) -> TokenUsageAccounting {
+        TokenUsageAccounting {
+            non_last_reasoning_tokens: self.non_last_reasoning_tokens,
+            server_reported_usage_item_count: Some(self.last_server_reported_usage_item_count),
+        }
+    }
+
+    pub(crate) fn restore_token_info(
+        &mut self,
+        info: Option<TokenUsageInfo>,
+        accounting: Option<TokenUsageAccounting>,
+    ) {
+        self.token_info = info;
+        if let Some(accounting) = accounting
+            && let Some(covered_item_count) = accounting.server_reported_usage_item_count
+        {
+            self.non_last_reasoning_tokens = accounting.non_last_reasoning_tokens;
+            self.last_server_reported_usage_item_count = covered_item_count.min(self.items.len());
+        } else {
+            // Keep reported usage, discarding unproven reasoning and tail supplements.
+            self.non_last_reasoning_tokens = 0;
+            self.last_server_reported_usage_item_count = self.items.len();
+        }
+    }
+
+    pub(crate) fn set_token_estimate(
+        &mut self,
+        tokens: i64,
+        model_context_window: Option<i64>,
+        covered_item_count: usize,
+    ) {
+        let mut info = self.token_info.clone().unwrap_or(TokenUsageInfo {
+            total_token_usage: TokenUsage::default(),
+            last_token_usage: TokenUsage::default(),
+            last_usage_includes_reasoning: None,
+            model_context_window: None,
+        });
+        info.last_token_usage = TokenUsage {
+            total_tokens: tokens.max(0),
+            ..Default::default()
+        };
+        if let Some(model_context_window) = model_context_window {
+            info.model_context_window = Some(model_context_window);
+        }
+        info.last_usage_includes_reasoning = Some(true);
+        self.set_token_info_with_boundary(Some(info), covered_item_count);
     }
 
     pub(crate) fn set_reference_context_item(&mut self, item: Option<TurnContextItem>) {
@@ -519,6 +586,8 @@ impl ContextManager {
     }
 
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
+        self.non_last_reasoning_tokens = 0;
+        self.last_server_reported_usage_item_count = self.items.len();
         match &mut self.token_info {
             Some(info) => info.fill_to_context_window(context_window),
             None => {
@@ -734,6 +803,7 @@ impl ContextManager {
             // running a full normalization pass.
             normalize::remove_corresponding_for(items, &removed.item);
             self.reset_last_usage_boundary();
+            self.non_last_reasoning_tokens = 0;
             self.world_state_baseline = None;
         }
     }
@@ -755,6 +825,7 @@ impl ContextManager {
         }
         self.items = Arc::new(items);
         self.reset_last_usage_boundary();
+        self.non_last_reasoning_tokens = 0;
         self.history_version = self.history_version.saturating_add(1);
         self.reset_version = self.history_version;
         self.world_state_baseline = None;
@@ -794,6 +865,7 @@ impl ContextManager {
         }
         self.items = Arc::new(items);
         self.reset_last_usage_boundary();
+        self.non_last_reasoning_tokens = 0;
         self.history_version = self.history_version.saturating_add(1);
         if promoted {
             self.reset_version = self.history_version;
@@ -968,9 +1040,14 @@ impl ContextManager {
     }
 
     fn get_non_last_reasoning_items_tokens(&self) -> i64 {
-        // Get reasoning items excluding all the ones after the last instruction boundary.
-        let Some(last_user_index) = self
+        // A trailing user message has not been sampled yet. Find the instruction
+        // boundary of the latest model response, including when restoring usage.
+        let response_end = self
             .items
+            .iter()
+            .rposition(|envelope| is_model_generated_item(&envelope.item))
+            .map_or(self.items.len(), |index| index.saturating_add(1));
+        let Some(last_user_index) = self.items[..response_end]
             .iter()
             .rposition(|envelope| is_user_turn_boundary(&envelope.item))
         else {
@@ -1003,24 +1080,16 @@ impl ContextManager {
             .map(|envelope| &envelope.item)
     }
 
+    /// Reasoning coverage belongs to the usage baseline, not the next request's flags.
     pub(crate) fn get_total_token_usage(&self) -> i64 {
         let last_tokens = self
             .token_info
             .as_ref()
             .map(|info| info.last_token_usage.total_tokens)
             .unwrap_or(0);
-        let unreported_tokens = self.estimated_tokens_since_last_usage();
-        if self
-            .token_info
-            .as_ref()
-            .is_some_and(|info| info.last_usage_includes_reasoning == Some(true))
-        {
-            last_tokens.saturating_add(unreported_tokens)
-        } else {
-            last_tokens
-                .saturating_add(self.get_non_last_reasoning_items_tokens())
-                .saturating_add(unreported_tokens)
-        }
+        last_tokens
+            .saturating_add(self.non_last_reasoning_tokens)
+            .saturating_add(self.estimated_tokens_since_last_usage())
     }
 
     pub(crate) fn estimated_tokens_since_last_usage(&self) -> i64 {

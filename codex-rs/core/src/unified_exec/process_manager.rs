@@ -558,6 +558,11 @@ impl UnifiedExecProcessManager {
             permissions,
         } = attempt;
         let process = Arc::new(process);
+        let task_observer = crate::claude_code::session_runtime(&context.session)
+            .and_then(|runtime| runtime.tasks.observer(&context.call_id));
+        if let Some(observer) = &task_observer {
+            observer.started(request.process_id);
+        }
         if let Some(completion) = completion.as_ref() {
             let _ = completion.process.set(Arc::clone(&process));
         }
@@ -646,9 +651,12 @@ impl UnifiedExecProcessManager {
                 Arc::clone(&initial_exec_command_active),
             )
             .await;
+        } else if let Some(observer) = &task_observer {
+            observer.admitted();
         }
 
-        let yield_time_ms = clamp_yield_time(prepared.yield_time_ms);
+        // Native tasks own their foreground wait and background output collector.
+        let yield_time_ms = if task_observer.is_some() { 0 } else { clamp_yield_time(prepared.yield_time_ms) };
         // For the initial exec_command call, we both stream output to events
         // (via start_streaming_output above) and collect a snapshot here for
         // the tool response body.
@@ -1287,6 +1295,12 @@ impl UnifiedExecProcessManager {
             store.processes.insert(process_id, entry);
             pruned_entry
         };
+        if let Some(observer) = crate::claude_code::session_runtime(&context.session)
+            .and_then(|runtime| runtime.tasks.observer(&context.call_id))
+            && observer.admitted()
+        {
+            process.terminate();
+        }
         spawn_exit_watcher(
             Arc::clone(&process),
             context,
@@ -1373,6 +1387,10 @@ impl UnifiedExecProcessManager {
         tty: bool,
         environment: &codex_exec_server::Environment,
     ) -> Result<UnifiedExecProcess, UnifiedExecError> {
+        let observer = tool_ctx.and_then(|context| {
+            crate::claude_code::session_runtime(&context.session)
+                .and_then(|runtime| runtime.tasks.observer(&context.call_id))
+        });
         if environment.is_remote() || request.exec_server_shell_snapshot.is_some() {
             let backend = environment.get_exec_backend();
             let params = exec_server_params_for_request(
@@ -1405,8 +1423,12 @@ impl UnifiedExecProcessManager {
             } else {
                 OutputDrainPolicy::BoundedAfterExit
             };
-            return UnifiedExecProcess::from_exec_server_started(started, output_drain_policy)
-                .await;
+            return UnifiedExecProcess::from_exec_server_started_observed(
+                started,
+                output_drain_policy,
+                observer,
+            )
+            .await;
         }
 
         // TODO(anp): Keep PathUri through the local PTY/process launch boundary.
@@ -1477,7 +1499,7 @@ impl UnifiedExecProcessManager {
         .await;
         let spawned =
             spawn_result.map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
-        UnifiedExecProcess::from_spawned(spawned, request.sandbox).await
+        UnifiedExecProcess::from_spawned_observed(spawned, request.sandbox, observer).await
     }
 
     #[tracing::instrument(

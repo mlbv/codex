@@ -321,6 +321,9 @@ pub(super) fn is_v2_resident_session_source(session_source: &SessionSource) -> b
 }
 
 async fn is_unloadable(thread: &CodexThread) -> bool {
+    if crate::claude_code::has_pending_work(&thread.session) {
+        return false;
+    }
     matches!(
         thread.agent_status().await,
         AgentStatus::PendingInit

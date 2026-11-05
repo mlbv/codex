@@ -1038,6 +1038,16 @@ fn main() -> anyhow::Result<()> {
     codex_build_info::initialize!();
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
+        let mut args = std::env::args_os().skip(1);
+        if args.next().as_deref() == Some(std::ffi::OsStr::new("claude-code-bridge")) {
+            let args = args
+                .map(|arg| {
+                    arg.into_string()
+                        .map_err(|_| anyhow::anyhow!("bridge arguments must be UTF-8"))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            return codex_core::claude_code::run_bridge(args).await;
+        }
         // Finish polling the large subcommand dispatcher before polling interactive TUI events.
         if let Some(tui) = Box::pin(dispatch_cli(arg0_paths, remote_control_disabled)).await? {
             tui.await?;

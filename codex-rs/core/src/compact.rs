@@ -830,7 +830,8 @@ async fn drain_to_completed(
     prompt: &Prompt,
     phase: CompactionPhase,
 ) -> CodexResult<CompactionResponse> {
-    let mut includes_reasoning = turn_context.model_info().use_responses_lite;
+    // Absent coverage metadata must not add an unproven reasoning supplement.
+    let mut includes_reasoning = true;
     let mut stream = client_session
         .stream(
             prompt,

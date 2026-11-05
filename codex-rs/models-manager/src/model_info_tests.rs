@@ -144,8 +144,8 @@ fn personality_none_strips_catalog_instruction_sources_through_the_next_h1() {
         ),
         ("Intro\n\n# Personality\n\nRemove me", "Intro\n\n"),
         (
-            "Intro\n\n## Personality\n\nKeep me",
-            "Intro\n\n## Personality\n\nKeep me",
+            "Intro\n\n## Personality\n\nRemove me\n\n### Writing Style\nRemove this too\n\n## Planning\nKeep me",
+            "Intro\n\n## Planning\nKeep me",
         ),
         (
             "Intro\n\n# Personality \n\nKeep me",
@@ -248,6 +248,87 @@ fn unknown_model_uses_builtin_instruction_template() {
     let model = model_info_from_slug("unknown-model");
 
     assert_eq!(render_model_instructions(&model), BASE_INSTRUCTIONS);
+}
+
+
+#[test]
+fn provider_instructions_keep_their_context_around_the_bundled_personality() {
+    let mut model = crate::bundled_models_response()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.slug == "gpt-6.1-sol")
+        .unwrap();
+    let bundled_template = render_model_instructions(&model);
+    let bundled_personality = &bundled_template[bundled_template.find("# Personality\n").unwrap()
+        ..bundled_template.find("# Working with the user\n").unwrap()];
+    model.model_messages.as_mut().unwrap().instructions_template = Some(
+        "Provider introduction\n# Personality\nProvider personality\n# Provider tools\nProvider tool instructions"
+            .to_string(),
+    );
+    model.context_window = Some(123_456);
+    model.default_verbosity = Some(codex_protocol::config_types::Verbosity::Low);
+
+    let updated = with_config_overrides(model.clone(), &ModelsManagerConfig::default());
+    let instructions = render_model_instructions(&updated);
+    assert!(instructions.starts_with("Provider introduction\n"));
+    assert!(instructions.contains(bundled_personality));
+    assert!(!instructions.contains("Provider personality"));
+    assert!(instructions.ends_with("# Provider tools\nProvider tool instructions"));
+    assert_eq!(updated.context_window, model.context_window);
+    assert_eq!(
+        updated.default_verbosity,
+        Some(codex_protocol::config_types::Verbosity::High)
+    );
+
+    let disabled = with_config_overrides(model, &config_with_personality(Some(Personality::None)));
+    assert_eq!(
+        render_model_instructions(&disabled),
+        "Provider introduction\n# Provider tools\nProvider tool instructions"
+    );
+}
+
+#[test]
+fn explicit_catalog_and_instruction_file_keep_their_prompt_authority() {
+    let catalog = crate::bundled_models_response().unwrap();
+    let mut model = catalog
+        .models
+        .iter()
+        .find(|model| model.slug == "gpt-6.1-sol")
+        .unwrap()
+        .clone();
+    let explicit_template = "Explicit introduction\n# Personality\nExplicit personality";
+    model.model_messages.as_mut().unwrap().instructions_template = Some(explicit_template.to_string());
+    model.default_verbosity = Some(codex_protocol::config_types::Verbosity::Low);
+    let config = ModelsManagerConfig {
+        model_catalog: Some(catalog),
+        ..Default::default()
+    };
+    let updated = with_config_overrides(model.clone(), &config);
+    assert_eq!(render_model_instructions(&updated), explicit_template);
+    assert_eq!(updated.default_verbosity, model.default_verbosity);
+
+    let custom_instructions = "Custom instructions\n# Personality\nCustom personality";
+    let config = ModelsManagerConfig {
+        base_instructions: Some(custom_instructions.to_string()),
+        personality: Some(Personality::None),
+        ..Default::default()
+    };
+    let updated = with_config_overrides(model, &config);
+    assert_eq!(render_model_instructions(&updated), custom_instructions);
+}
+
+#[test]
+fn fallback_personality_can_be_disabled_without_removing_runtime_guidance() {
+    let updated = with_config_overrides(
+        model_info_from_slug("unknown-model"),
+        &config_with_personality(Some(Personality::None)),
+    );
+    let instructions = render_model_instructions(&updated);
+    let has_line = |expected: &str| instructions.lines().any(|line| line == expected);
+    assert!(!has_line("## Personality"));
+    assert!(has_line("# AGENTS.md spec"));
+    assert!(has_line("# Tool Guidelines"));
 }
 
 #[test]

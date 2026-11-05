@@ -149,6 +149,7 @@ pub(crate) fn build_tool_router(
     };
     let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
     add_core_tool_sources(&context, &mut registry);
+    crate::claude_code::append_tools(&turn_context.config, &mut registry);
 
     let registered_mcp_tools = session.services.mcp_handler_cache.append_mcp_tools(
         mcp,
@@ -1515,16 +1516,18 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 native_review,
             );
             if !turn_context.config.multi_agent_v2.disable_direct_message {
-                registry.register_trusted_with_native_review(
-                    multi_agent_v2_handler(
-                        SendMessageHandlerV2,
-                        tool_namespace,
-                        model_messages.multi_agent_tool_description_override("send_message"),
-                        model_messages.multi_agent_tool_parameters_override("send_message"),
-                    ),
-                    exposure,
-                    native_review,
-                );
+                if tool_namespace.is_some() || !features_messaging(turn_context) {
+                    registry.register_trusted_with_native_review(
+                        multi_agent_v2_handler(
+                            SendMessageHandlerV2,
+                            tool_namespace,
+                            model_messages.multi_agent_tool_description_override("send_message"),
+                            model_messages.multi_agent_tool_parameters_override("send_message"),
+                        ),
+                        exposure,
+                        native_review,
+                    );
+                }
                 registry.register_trusted_with_native_review(
                     multi_agent_v2_handler(
                         FollowupTaskHandlerV2,
@@ -1557,15 +1560,17 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 exposure,
                 native_review,
             );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(
-                    ListAgentsHandlerV2,
-                    tool_namespace,
-                    model_messages.multi_agent_tool_description_override("list_agents"),
-                    model_messages.multi_agent_tool_parameters_override("list_agents"),
-                ),
-                exposure,
-            );
+            if tool_namespace.is_some() || !features_messaging(turn_context) {
+                registry.register_trusted_with_exposure(
+                    multi_agent_v2_handler(
+                        ListAgentsHandlerV2,
+                        tool_namespace,
+                        model_messages.multi_agent_tool_description_override("list_agents"),
+                        model_messages.multi_agent_tool_parameters_override("list_agents"),
+                    ),
+                    exposure,
+                );
+            }
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
@@ -1597,6 +1602,13 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             registry.add_with_exposure(CloseAgentHandler, exposure);
         }
     }
+}
+
+fn features_messaging(turn_context: &TurnContext) -> bool {
+    turn_context
+        .config
+        .features
+        .enabled(Feature::ClaudeMessaging)
 }
 
 #[instrument(level = "trace", skip_all, fields(dynamic_tool_count = dynamic_tools.len()))]

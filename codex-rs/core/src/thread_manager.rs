@@ -2702,7 +2702,7 @@ impl ThreadManagerState {
             }
         };
         if matches!(ready_notification, ThreadReadyNotification::Emit) {
-            new_thread.thread.emit_thread_ready_lifecycle().await;
+            new_thread.thread.emit_thread_ready_lifecycle().await?;
         }
         if source_changed_during_startup.load(Ordering::Acquire) {
             new_thread.thread.session.request_mcp_runtime_refresh();

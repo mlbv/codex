@@ -10,6 +10,152 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageRecord;
 use pretty_assertions::assert_eq;
 
+fn reasoning_accounting_history() -> Vec<codex_protocol::models::ResponseItem> {
+    use serde_json::json;
+    [
+        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"first"}]}),
+        json!({"type":"reasoning","summary":[],"encrypted_content":"a".repeat(2_000)}),
+        json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"first answer"}]}),
+        json!({"type":"message","role":"user","content":[{"type":"input_text","text":"second"}]}),
+        json!({"type":"reasoning","summary":[],"encrypted_content":"b".repeat(3_000)}),
+        json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"second answer"}]}),
+    ].into_iter().map(|value| serde_json::from_value(value).unwrap()).collect()
+}
+
+#[tokio::test]
+async fn token_usage_reasoning_coverage_survives_new_user_turn() {
+    use codex_protocol::models::BaseInstructions;
+    use codex_utils_output_truncation::TruncationPolicy;
+    for includes_reasoning in [false, true] {
+        let mut state = SessionState::new(make_session_configuration_for_tests().await);
+        state.history.record_items(
+            reasoning_accounting_history().iter(),
+            TruncationPolicy::Tokens(10_000),
+        );
+        state.update_token_info_from_usage(
+            &TokenUsage {
+                total_tokens: 260,
+                ..Default::default()
+            },
+            None,
+            includes_reasoning,
+            /*input_item_count*/ 0,
+        );
+        let baseline = state.get_total_token_usage();
+        if !includes_reasoning {
+            assert!(baseline > 260);
+        } else {
+            assert_eq!(baseline, 260);
+        }
+        let before = state
+            .history
+            .estimate_token_count_with_base_instructions(&BaseInstructions::default())
+            .unwrap();
+        let fresh = serde_json::from_value::<codex_protocol::models::ResponseItem>(serde_json::json!({
+            "type":"message","role":"user","content":[{"type":"input_text","text":"fresh user input"}]
+        })).unwrap();
+        state
+            .history
+            .record_items([&fresh], TruncationPolicy::Tokens(10_000));
+        let after = state
+            .history
+            .estimate_token_count_with_base_instructions(&BaseInstructions::default())
+            .unwrap();
+        assert_eq!(state.get_total_token_usage(), baseline + after - before);
+    }
+}
+
+#[tokio::test]
+async fn token_usage_reasoning_coverage_survives_rollout_roundtrip() {
+    use codex_history::RolloutItem;
+    use codex_protocol::models::BaseInstructions;
+    use codex_protocol::protocol::{EventMsg, TokenCountEvent};
+    use codex_utils_output_truncation::TruncationPolicy;
+    for includes_reasoning in [None, Some(false), Some(true)] {
+        let mut state = SessionState::new(make_session_configuration_for_tests().await);
+        state.history.record_items(
+            reasoning_accounting_history().iter(),
+            TruncationPolicy::Tokens(10_000),
+        );
+        let tail = serde_json::from_value::<codex_protocol::models::ResponseItem>(serde_json::json!({
+            "type":"message","role":"user","content":[{"type":"input_text","text":"included in full recount"}]
+        })).unwrap();
+        state
+            .history
+            .record_items([&tail], TruncationPolicy::Tokens(10_000));
+        let estimate = state
+            .history
+            .estimate_token_count_with_base_instructions(&BaseInstructions::default())
+            .unwrap();
+        match includes_reasoning {
+            Some(included) => {
+                state.update_token_info_from_usage(
+                    &TokenUsage {
+                        total_tokens: 260,
+                        ..Default::default()
+                    },
+                    None,
+                    included,
+                    /*input_item_count*/ 0,
+                );
+            }
+            None => {
+                let covered_item_count = state.history.raw_items().len();
+                state.history.set_token_estimate(estimate, None, covered_item_count);
+            }
+        }
+        let baseline = state.get_total_token_usage();
+        let event = EventMsg::TokenCount(TokenCountEvent {
+            info: state.token_info(),
+            rate_limits: None,
+            accounting: Some(state.history.token_usage_accounting()),
+        });
+        let public = serde_json::to_value(&event).unwrap();
+        assert!(public.get("accounting").is_none());
+        let encoded = serde_json::to_value(RolloutItem::EventMsg(event)).unwrap();
+        assert!(encoded.get("accounting").is_some());
+        assert!(
+            encoded["accounting"]
+                .get("confirmed_excluded_reasoning_tokens")
+                .is_some()
+        );
+        assert!(
+            encoded["accounting"]
+                .get("non_last_reasoning_tokens")
+                .is_none()
+        );
+        assert!(encoded["payload"].get("accounting").is_none());
+        let RolloutItem::EventMsg(EventMsg::TokenCount(event)) =
+            serde_json::from_value(encoded).unwrap()
+        else {
+            panic!("expected a token-count record");
+        };
+        let mut restored = SessionState::new(make_session_configuration_for_tests().await);
+        restored
+            .history
+            .record_items(state.history.raw_items(), TruncationPolicy::Tokens(10_000));
+        restored
+            .history
+            .restore_token_info(event.info, event.accounting);
+        assert_eq!(restored.get_total_token_usage(), baseline);
+        let fresh = serde_json::from_value::<codex_protocol::models::ResponseItem>(serde_json::json!({
+            "type":"message","role":"user","content":[{"type":"input_text","text":"added after resume"}]
+        }))
+        .unwrap();
+        restored
+            .history
+            .record_items([&fresh], TruncationPolicy::Tokens(10_000));
+        let after = restored
+            .history
+            .estimate_token_count_with_base_instructions(&BaseInstructions::default())
+            .unwrap();
+        assert_eq!(
+            restored.get_total_token_usage(),
+            baseline + after - estimate
+        );
+    }
+}
+
 #[tokio::test]
 async fn record_token_usage_continues_restored_totals() {
     let thread_id = ThreadId::new();
