@@ -20,6 +20,11 @@ impl Session {
         token_usage_at_turn_start: Option<&TokenUsage>,
         phase: TurnStartPhase,
     ) {
+        if phase == TurnStartPhase::BeforeTaskRegistration
+            && let Err(error) = crate::claude_code::turn_started(self, &turn_context.sub_id).await
+        {
+            crate::claude_code::report_error(self, error).await;
+        }
         let metadata: Arc<dyn TurnAnalyticsMetadata> = turn_context.turn_metadata_state.clone();
         turn_context.extension_data.insert(metadata);
         turn_context
@@ -74,6 +79,12 @@ impl Session {
         };
         if self.input_queue.has_trigger_turn_mailbox_items().await {
             return;
+        }
+
+        if cause == ThreadIdleCause::Completed
+            && let Err(error) = crate::claude_code::idle(self).await
+        {
+            crate::claude_code::report_error(self, error).await;
         }
 
         for contributor in self.services.extensions.thread_lifecycle_contributors() {

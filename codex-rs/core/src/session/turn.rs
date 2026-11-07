@@ -1776,6 +1776,7 @@ pub(crate) fn build_prompt(
             &turn_context.session_source,
         ),
         cyber_access_program: turn_context.cyber_access_program,
+        controls: Default::default(),
     }
 }
 
@@ -3425,6 +3426,12 @@ async fn try_run_sampling_request(
                 if let Some(event) = consumer.consume_diff(turn_context.as_ref(), call_id, &delta) {
                     sess.send_event(&turn_context, event).await;
                 }
+            }
+            ResponseEvent::FunctionCallArgumentsDelta { .. } => {}
+            ResponseEvent::Incomplete { reason, .. } => {
+                break Err(CodexErr::Stream(format!(
+                    "Incomplete response returned, reason: {reason}"
+                )));
             }
             ResponseEvent::ReasoningSummaryDelta {
                 delta,

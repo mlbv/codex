@@ -98,6 +98,7 @@ mod environment_selection;
 pub mod exec;
 pub mod exec_env;
 mod exec_policy;
+pub mod external_harness;
 #[cfg(test)]
 mod git_info_tests;
 mod guardian;
@@ -143,6 +144,7 @@ mod skills;
 pub(crate) use skills::maybe_emit_implicit_skill_invocation;
 #[cfg(test)]
 pub(crate) use skills::skills_load_input_from_config;
+pub mod claude_code;
 mod stream_events_utils;
 pub mod test_support;
 mod unified_exec;
@@ -252,8 +254,10 @@ pub use client::X_CODEX_INSTALLATION_ID_HEADER;
 pub use client::X_CODEX_ROUTING_HINT_HEADER;
 pub use client::X_CODEX_TURN_METADATA_HEADER;
 pub use client_common::Prompt;
+pub use client_common::ResponseControls;
 pub use client_common::ResponseEvent;
 pub use client_common::ResponseStream;
+pub use client_common::ToolChoice;
 pub use codex_prompts::REVIEW_PROMPT;
 pub use compact::content_items_to_text;
 pub use current_time::SleepFuture;

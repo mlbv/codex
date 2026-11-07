@@ -7,6 +7,7 @@ pub mod model_info;
 pub mod model_presets;
 mod originator;
 pub mod test_support;
+pub mod upstream_changes;
 
 pub use catalog::CatalogModel;
 pub use catalog::ModelOrigin;

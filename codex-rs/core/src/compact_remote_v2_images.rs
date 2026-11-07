@@ -21,7 +21,7 @@ pub(super) fn content_item_token_count(item: &ContentItem) -> usize {
             approx_tokens_from_byte_count_i64(estimate_image_reference_bytes(image, *detail)),
         )
         .unwrap_or(usize::MAX),
-        ContentItem::InputAudio { .. } => 0,
+        ContentItem::InputAudio { .. } | ContentItem::InputFile { .. } => 0,
     }
 }
 
@@ -87,7 +87,7 @@ pub(super) fn truncate_message_to_token_budget(
                     retained.push(item);
                 }
             }
-            ContentItem::InputAudio { .. } => retained.push(item),
+            ContentItem::InputAudio { .. } | ContentItem::InputFile { .. } => retained.push(item),
             ContentItem::InputImage { .. } => unreachable!("images are handled atomically above"),
         }
     }

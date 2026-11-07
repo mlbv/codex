@@ -17,7 +17,7 @@ use http::HeaderValue;
 
 const X_CODEX_IMAGE_TURN_ID_HEADER: &str = "x-codex-image-turn-id";
 
-pub(crate) struct ImageBackendError {
+pub struct ImageBackendError {
     message: String,
     codex_error: CodexErr,
     imagegen_request_id: Option<String>,
@@ -42,15 +42,15 @@ impl ImageBackendError {
         }
     }
 
-    pub(crate) fn message(&self) -> &str {
+    pub fn message(&self) -> &str {
         &self.message
     }
 
-    pub(crate) fn codex_error(&self) -> &CodexErr {
+    pub fn codex_error(&self) -> &CodexErr {
         &self.codex_error
     }
 
-    pub(crate) fn imagegen_request_id(&self) -> Option<&str> {
+    pub fn imagegen_request_id(&self) -> Option<&str> {
         self.imagegen_request_id.as_deref()
     }
 }

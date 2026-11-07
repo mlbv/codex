@@ -70,12 +70,13 @@ enum TurnStartKind {
     User,
     Automatic,
     Recovery,
+    Background,
 }
 
 impl TurnStartKind {
     fn permits_mode(self, mode: ModeKind) -> bool {
         match self {
-            Self::User | Self::Recovery => true,
+            Self::User | Self::Recovery | Self::Background => true,
             Self::Automatic => mode != ModeKind::Plan,
         }
     }
@@ -168,7 +169,7 @@ impl PreparedTurnInputSettings {
             cyber_access_program,
         };
         let turn_context = match kind {
-            TurnStartKind::User | TurnStartKind::Recovery => Some(
+            TurnStartKind::User | TurnStartKind::Recovery | TurnStartKind::Background => Some(
                 session
                     .new_turn_with_sub_id(submission_id.clone(), updates, options)
                     .await?,
@@ -293,6 +294,16 @@ pub(super) async fn handle(
         }
         TurnInputMode::Steer { expected_turn_id } => {
             steer(session, request, expected_turn_id, submission_id).await
+        }
+        TurnInputMode::WakeIfIdle => {
+            start_if_idle(
+                session,
+                request,
+                submission_id,
+                TurnStartKind::Background,
+                None,
+            )
+            .await
         }
     };
     // Link this request's trace to the accepted turn, which may have an older trace.
@@ -541,6 +552,11 @@ async fn start_if_idle(
                 reason: NotSubmittedReason::NotIdle,
             });
         }
+        if kind == TurnStartKind::Background && session.is_interrupted() {
+            return Ok(TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::Superseded,
+            });
+        }
         if let Some(expected) = expected_previous_turn_id
             && session.state.lock().await.last_started_turn_id.as_ref() != Some(&expected)
         {
@@ -616,7 +632,7 @@ async fn start_if_idle(
                 .await,
             );
         }
-        TurnStartKind::Automatic | TurnStartKind::Recovery => {
+        TurnStartKind::Automatic | TurnStartKind::Recovery | TurnStartKind::Background => {
             // Empty automatic user input resumes sampling without a new message.
             if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
                 session

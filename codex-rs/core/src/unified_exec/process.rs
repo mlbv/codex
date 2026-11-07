@@ -46,10 +46,14 @@ const REMOTE_OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(5);
 pub(crate) struct OutputBuffers<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_MAX_BYTES> {
     pub(super) pending: HeadTailBuffer<MAX_BYTES>,
     pub(super) transcript: HeadTailBuffer<MAX_BYTES>,
+    observer: Option<crate::claude_code::tasks::TaskObserver>,
 }
 
 impl<const MAX_BYTES: usize> OutputBuffers<MAX_BYTES> {
-    pub(super) fn push_chunk(&mut self, _stream: ExecOutputStream, chunk: &[u8]) {
+    pub(super) async fn push_chunk(&mut self, stream: ExecOutputStream, chunk: &[u8]) {
+        if let Some(observer) = &self.observer {
+            observer.output(stream, chunk).await;
+        }
         self.pending.push_chunk(chunk);
         self.transcript.push_chunk(chunk);
     }
@@ -71,6 +75,21 @@ pub(crate) struct OutputHandles<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_MAX
 struct OutputTaskGuard {
     output_closed: Arc<AtomicBool>,
     output_closed_notify: Arc<Notify>,
+}
+
+struct ObservedOutputGuard(crate::claude_code::tasks::TaskObserver);
+
+impl ObservedOutputGuard {
+    fn new(observer: crate::claude_code::tasks::TaskObserver) -> Self {
+        observer.output_started();
+        Self(observer)
+    }
+}
+
+impl Drop for ObservedOutputGuard {
+    fn drop(&mut self) {
+        self.0.output_closed();
+    }
 }
 
 impl Drop for OutputTaskGuard {
@@ -129,9 +148,13 @@ impl UnifiedExecProcess {
         process_handle: ProcessHandle,
         sandbox_type: Option<SandboxType>,
         drain_policy: OutputDrainPolicy,
+        observer: Option<crate::claude_code::tasks::TaskObserver>,
     ) -> Self {
         let output = OutputHandles {
-            output_buffer: Arc::new(Mutex::new(OutputBuffers::default())),
+            output_buffer: Arc::new(Mutex::new(OutputBuffers {
+                observer,
+                ..Default::default()
+            })),
             output_notify: Arc::new(Notify::new()),
             output_closed: Arc::new(AtomicBool::new(false)),
             output_closed_notify: Arc::new(Notify::new()),
@@ -357,6 +380,14 @@ impl UnifiedExecProcess {
         spawned: SpawnedPty,
         sandbox_type: SandboxType,
     ) -> Result<Self, UnifiedExecError> {
+        Self::from_spawned_observed(spawned, sandbox_type, None).await
+    }
+
+    pub(super) async fn from_spawned_observed(
+        spawned: SpawnedPty,
+        sandbox_type: SandboxType,
+        observer: Option<crate::claude_code::tasks::TaskObserver>,
+    ) -> Result<Self, UnifiedExecError> {
         let SpawnedPty {
             session: process_handle,
             stdout_rx,
@@ -367,12 +398,14 @@ impl UnifiedExecProcess {
             ProcessHandle::Local(Box::new(process_handle)),
             Some(sandbox_type),
             OutputDrainPolicy::BoundedAfterExit,
+            observer.clone(),
         );
         managed.output_task = Some(Self::spawn_local_output_task(
             stdout_rx,
             stderr_rx,
             managed.output_handles().clone(),
             managed.output_tx.clone(),
+            observer,
         ));
 
         match exit_rx.try_recv() {
@@ -413,11 +446,24 @@ impl UnifiedExecProcess {
         started: StartedExecProcess,
         output_drain_policy: OutputDrainPolicy,
     ) -> Result<Self, UnifiedExecError> {
+        Self::from_exec_server_started_observed(started, output_drain_policy, None).await
+    }
+
+    pub(super) async fn from_exec_server_started_observed(
+        started: StartedExecProcess,
+        output_drain_policy: OutputDrainPolicy,
+        observer: Option<crate::claude_code::tasks::TaskObserver>,
+    ) -> Result<Self, UnifiedExecError> {
         let process_handle = ProcessHandle::ExecServer(Arc::clone(&started.process));
         // Older peers do not report this field. In that case, skip local
         // classification rather than attributing a violation to a guessed backend.
         let sandbox_type = started.sandbox_type;
-        let mut managed = Self::new(process_handle, sandbox_type, output_drain_policy);
+        let mut managed = Self::new(
+            process_handle,
+            sandbox_type,
+            output_drain_policy,
+            observer.clone(),
+        );
         let output_handles = managed.output_handles().clone();
         managed.output_task = Some(Self::spawn_exec_server_output_task(
             started,
@@ -426,6 +472,7 @@ impl UnifiedExecProcess {
             managed.output_tx.clone(),
             managed.state_tx.clone(),
             managed.interaction_lock(),
+            observer,
         ));
 
         let mut state_rx = managed.state_rx.clone();
@@ -456,6 +503,7 @@ impl UnifiedExecProcess {
         output_tx: broadcast::Sender<Vec<u8>>,
         state_tx: watch::Sender<ProcessState>,
         interaction_lock: Arc<Mutex<()>>,
+        observer: Option<crate::claude_code::tasks::TaskObserver>,
     ) -> JoinHandle<()> {
         let OutputHandles {
             output_buffer,
@@ -469,7 +517,9 @@ impl UnifiedExecProcess {
         let process = started.process;
         let mut events = process.subscribe_events();
         let mut state_rx = state_tx.subscribe();
+        let observed_output = observer.map(ObservedOutputGuard::new);
         tokio::spawn(async move {
+            let _observed_output = observed_output;
             let _output_task_guard = OutputTaskGuard {
                 output_closed: Arc::clone(&output_closed),
                 output_closed_notify: Arc::clone(&output_closed_notify),
@@ -559,7 +609,7 @@ impl UnifiedExecProcess {
                     for chunk in chunks.into_iter().filter(|chunk| chunk.seq > last_seq) {
                         let bytes = chunk.chunk.into_inner();
                         let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(chunk.stream, &bytes);
+                        guard.push_chunk(chunk.stream, &bytes).await;
                         drop(guard);
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
@@ -605,7 +655,7 @@ impl UnifiedExecProcess {
                         last_seq = chunk.seq;
                         let bytes = chunk.chunk.into_inner();
                         let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(chunk.stream, &bytes);
+                        guard.push_chunk(chunk.stream, &bytes).await;
                         drop(guard);
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
@@ -659,7 +709,11 @@ impl UnifiedExecProcess {
         mut stderr: tokio::sync::mpsc::Receiver<Vec<u8>>,
         output_handles: OutputHandles,
         output_tx: broadcast::Sender<Vec<u8>>,
+        observer: Option<crate::claude_code::tasks::TaskObserver>,
     ) -> JoinHandle<()> {
+        let mut observed_exit = observer
+            .as_ref()
+            .map(|_| output_handles.cancellation_token.clone());
         let OutputHandles {
             output_buffer,
             output_notify,
@@ -667,20 +721,34 @@ impl UnifiedExecProcess {
             output_closed_notify,
             ..
         } = output_handles;
+        let observed_output = observer.map(ObservedOutputGuard::new);
         tokio::spawn(async move {
+            let _observed_output = observed_output;
             let _output_task_guard = OutputTaskGuard {
                 output_closed: Arc::clone(&output_closed),
                 output_closed_notify: Arc::clone(&output_closed_notify),
             };
             let mut stdout_open = true;
             let mut stderr_open = true;
+            let mut exit_deadline = None;
             while stdout_open || stderr_open {
                 let (stream, chunk) = tokio::select! {
                     chunk = stdout.recv(), if stdout_open => (ExecOutputStream::Stdout, chunk),
                     chunk = stderr.recv(), if stderr_open => (ExecOutputStream::Stderr, chunk),
+                    _ = async { observed_exit.as_ref().unwrap().cancelled().await }, if observed_exit.is_some() => {
+                        observed_exit = None;
+                        exit_deadline = Some(tokio::time::Instant::now() + super::async_watcher::TRAILING_OUTPUT_GRACE);
+                        continue;
+                    }
+                    _ = async { tokio::time::sleep_until(exit_deadline.unwrap()).await }, if exit_deadline.is_some() => {
+                        stdout.close();
+                        stderr.close();
+                        exit_deadline = None;
+                        continue;
+                    }
                 };
                 if let Some(chunk) = chunk {
-                    output_buffer.lock().await.push_chunk(stream, &chunk);
+                    output_buffer.lock().await.push_chunk(stream, &chunk).await;
                     let _ = output_tx.send(chunk);
                     output_notify.notify_waiters();
                 } else if stream == ExecOutputStream::Stdout {

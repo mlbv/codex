@@ -119,6 +119,7 @@ pub(crate) fn user_input_parts(
             }
             ContentItem::InputImage { .. }
             | ContentItem::InputAudio { .. }
+            | ContentItem::InputFile { .. }
             | ContentItem::OutputText { .. } => true,
         })
 }
@@ -150,6 +151,8 @@ fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
                     audio: audio.clone(),
                 });
             }
+            // TODO: no `UserInput` file variant; files stay in history but not in turn items.
+            ContentItem::InputFile { .. } => {}
             ContentItem::OutputText { text, .. } => {
                 warn!("Output text in user message: {}", text);
             }

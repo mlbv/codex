@@ -1,5 +1,6 @@
 pub use binding::McpBinding;
 pub use binding::PreparedMcpCall;
+pub use binding::call_tool_result_from_rmcp;
 pub use client_capabilities::client_mcp_extensions;
 pub use client_tool_catalog::CodexAppsToolSnapshot;
 pub use codex_rmcp_client::McpProtocolMode;

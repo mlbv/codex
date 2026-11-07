@@ -302,6 +302,7 @@ fn truncate_output_iter<'a>(
     };
     let mut omitted_text_items = 0usize;
     let mut omitted_audio_items = 0usize;
+    let mut omitted_file_items = 0usize;
     let mut next_boundary = 0;
 
     for (index, item) in items.enumerate() {
@@ -354,6 +355,21 @@ fn truncate_output_iter<'a>(
                     false
                 }
             }
+            FunctionCallOutputContentItem::InputFile { file } => {
+                let cost = match policy {
+                    TruncationPolicy::Bytes(_) => file.payload_len(),
+                    TruncationPolicy::Tokens(_) => {
+                        approx_tokens_from_byte_count(file.payload_len()) as usize
+                    }
+                };
+                if cost <= remaining_budget {
+                    remaining_budget = remaining_budget.saturating_sub(cost);
+                    true
+                } else {
+                    omitted_file_items += 1;
+                    false
+                }
+            }
         };
         while let Some(boundary) = boundaries.get_mut(next_boundary)
             && boundary.item_index == index
@@ -386,6 +402,11 @@ fn truncate_output_iter<'a>(
     if omitted_audio_items > 0 {
         out.push(FunctionCallOutputContentItem::InputText {
             text: format!("[omitted {omitted_audio_items} audio items ...]"),
+        });
+    }
+    if omitted_file_items > 0 {
+        out.push(FunctionCallOutputContentItem::InputText {
+            text: format!("[omitted {omitted_file_items} file items ...]"),
         });
     }
     out

@@ -40,6 +40,7 @@ use tracing::error;
 use tracing::info;
 
 const MODEL_CACHE_FILE: &str = "models_cache.json";
+const UPSTREAM_CHANGES_DIRECTORY: &str = "model-catalog-changes";
 const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// Remote endpoint used by the OpenAI-compatible model manager.
@@ -324,6 +325,7 @@ pub struct OpenAiModelsManager {
     originator_managers: std::sync::Mutex<HashMap<ModelCatalogOriginator, SharedModelsManager>>,
     remote_models: RwLock<CatalogState>,
     cache: Option<Arc<dyn ModelsCache>>,
+    upstream_changes_dir: Option<PathBuf>,
     endpoint_client: SharedModelsEndpointClient,
     catalog_source: CatalogSource,
     api_key_model_discovery_enabled: Arc<AtomicBool>,
@@ -354,6 +356,7 @@ impl OpenAiModelsManager {
             endpoint_client,
             auth_manager,
         )
+        .with_upstream_changes_dir(codex_home.join(UPSTREAM_CHANGES_DIRECTORY))
     }
 
     /// Construct an OpenAI-compatible model manager with caching disabled.
@@ -391,11 +394,18 @@ impl OpenAiModelsManager {
                 models: load_remote_models_from_file().unwrap_or_default(),
             })),
             cache,
+            upstream_changes_dir: None,
             api_key_model_discovery_enabled: Arc::new(AtomicBool::new(false)),
             endpoint_client,
             catalog_source: CatalogSource::Default,
             auth_manager,
         }
+    }
+
+    /// Records distinct upstream discrepancies against the bundled model catalog as Markdown.
+    pub fn with_upstream_changes_dir(mut self, directory: PathBuf) -> Self {
+        self.upstream_changes_dir = Some(directory);
+        self
     }
 
     /// Configure a newly constructed manager to use only the provider's explicit catalog.
@@ -456,6 +466,9 @@ impl ModelsManager for OpenAiModelsManager {
             .as_ref()
             .and_then(|cache| cache.for_originator(originator));
         let mut manager = Self::new_with_optional_cache(cache, endpoint, self.auth_manager.clone());
+        manager
+            .upstream_changes_dir
+            .clone_from(&self.upstream_changes_dir);
         if matches!(self.catalog_source, CatalogSource::ExplicitProvider(_)) {
             manager = manager.with_provider_catalog();
         }
@@ -769,6 +782,17 @@ impl OpenAiModelsManager {
 
     /// Publish only while the request identity still matches, including after async storage.
     async fn apply_remote_models(&self, entry: ModelsCacheEntry) -> bool {
+        if let Some(directory) = &self.upstream_changes_dir {
+            match crate::upstream_changes::record_upstream_changes(directory, &entry.models).await {
+                Ok(Some(path)) => {
+                    info!(path = %path.display(), "recorded upstream model catalog changes")
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    error!(path = %directory.display(), "failed to record upstream model catalog changes: {err}")
+                }
+            }
+        }
         let mut current = self.remote_models.write().await;
         if entry.identity != self.endpoint_client.identity() {
             return false;
@@ -1037,7 +1061,8 @@ fn construct_model_info(
     });
     let mut metadata = Arc::unwrap_or_clone(resolved.model);
     metadata.slug = model.to_owned();
-    resolved.model = model_info::with_config_overrides(metadata, config).into();
+    resolved.model =
+        model_info::with_config_overrides_for_origin(metadata, resolved.origin, config).into();
     resolved
 }
 

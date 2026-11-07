@@ -128,6 +128,7 @@ impl SectionContent {
                 | ContentItem::InputAudio {
                     audio: AudioReference::File { .. },
                 } => 0,
+                ContentItem::InputFile { file } => file.payload_len(),
             },
         }
     }
@@ -576,7 +577,9 @@ impl ComposedContext {
                         continue;
                     }
                     ContentItem::InputImage { image, detail } => UserInput::Image { image, detail },
-                    ContentItem::InputAudio { .. } | ContentItem::OutputText { .. } => {
+                    ContentItem::InputAudio { .. }
+                    | ContentItem::InputFile { .. }
+                    | ContentItem::OutputText { .. } => {
                         return Err(SectionError::UnsupportedDelivery {
                             section: section.id,
                         });
