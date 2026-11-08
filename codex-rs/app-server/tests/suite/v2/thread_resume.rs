@@ -4243,6 +4243,7 @@ async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<
     append_rollout_item_to_path(
         &path,
         &RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            accounting: None,
             info: Some(TokenUsageInfo {
                 total_token_usage: TokenUsage {
                     input_tokens: 120,
@@ -4357,6 +4358,7 @@ async fn cold_paginated_resume_omits_usage_when_its_turn_is_ambiguous() -> Resul
     append_rollout_item_to_path(
         &path,
         &RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            accounting: None,
             info: Some(TokenUsageInfo {
                 total_token_usage: TokenUsage {
                     total_tokens: 150,
@@ -4637,6 +4639,7 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
             "timestamp": meta_rfc3339,
             "type": "event_msg",
             "payload": serde_json::to_value(EventMsg::TokenCount(TokenCountEvent {
+                accounting: None,
                 info: Some(TokenUsageInfo {
                     total_token_usage: TokenUsage {
                         input_tokens: 180,

@@ -624,6 +624,8 @@ impl LocalAgentControl {
         options: SpawnAgentOptions,
     ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot)> {
         let membership = self.runtime.admit_start()?;
+        let claude_delegation =
+            cfg!(feature = "claude-code") && config.features.enabled(Feature::ClaudeDelegation);
         let spawn_started_at = Instant::now();
         let state = self.runtime.upgrade()?;
         // Resolve the parent before inheriting settings or copying attachments.
@@ -883,7 +885,9 @@ impl LocalAgentControl {
         // to subscribe or drain this newly created thread.
         // TODO(jif) add helper for drain
         state.notify_thread_created(new_thread.thread_id);
-        if multi_agent_version != MultiAgentVersion::V2 {
+        if multi_agent_version != MultiAgentVersion::V2
+            && (!claude_delegation || agent_metadata.agent_path.is_none())
+        {
             let child_reference = agent_metadata
                 .agent_path
                 .as_ref()
@@ -1092,7 +1096,11 @@ impl LocalAgentControl {
         // Resumed threads are re-registered in-memory and need the same listener
         // attachment path as freshly spawned threads.
         state.notify_thread_created(resumed_thread.thread_id);
-        if multi_agent_version != MultiAgentVersion::V2 {
+        if multi_agent_version != MultiAgentVersion::V2
+            && (!(cfg!(feature = "claude-code")
+                && config.features.enabled(Feature::ClaudeDelegation))
+                || agent_metadata.agent_path.is_none())
+        {
             let child_reference = agent_metadata
                 .agent_path
                 .as_ref()

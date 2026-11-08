@@ -96,6 +96,7 @@ async fn cancelled_refresh_marks_only_started_exchanges_as_unsettled() -> anyhow
             .await,
             /*enable_codex_api_key_env*/ false,
             /*allowed_auth_modes*/ None,
+            /*enable_codex_access_token_env*/ false,
         )
         .await,
     );
@@ -2168,6 +2169,49 @@ fn auth_config_from_preserves_all_fields() {
     let config = test_auth_manager_config(codex_home.path());
 
     assert_eq!(auth_config_from(&config), config.0);
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn stored_auth_ignores_process_credentials_on_load_and_reload() {
+    let home = tempdir().unwrap();
+    let mut config = test_auth_manager_config(home.path()).0;
+    config.forced_login_method = None;
+    config.forced_chatgpt_workspace_id = None;
+    config.managed_auth_policy = ManagedAuthPolicy::default();
+    login_with_api_key(
+        home.path(),
+        "stored-test-key",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .unwrap();
+    let _api_key = EnvVarGuard::set(CODEX_API_KEY_ENV_VAR, "process-test-key");
+    let _access_token = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, "invalid-process-token");
+    let _federation = EnvVarGuard::set(OPENAI_FEDERATION_RULE_ID_ENV_VAR, "unused-process-rule");
+    let _identity = EnvVarGuard::remove(OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR);
+    let manager = AuthManager::from_stored_auth(
+        config,
+        vec![
+            AuthMode::Chatgpt,
+            AuthMode::ApiKey,
+            AuthMode::PersonalAccessToken,
+            AuthMode::AgentIdentity,
+        ],
+    )
+    .await;
+    assert_eq!(
+        manager.auth().await.unwrap().api_key(),
+        Some("stored-test-key")
+    );
+    manager.reload().await;
+    assert_eq!(
+        manager.auth().await.unwrap().api_key(),
+        Some("stored-test-key")
+    );
+    assert!(manager.logout().await.unwrap());
+    manager.reload().await;
+    assert!(manager.auth().await.is_none());
 }
 
 #[tokio::test]

@@ -12,6 +12,13 @@ doctest = false
 [lints]
 workspace = true
 
+[features]
+messages-api = [
+    "codex-core/messages-api",
+    "codex-protocol/messages-api",
+    "codex-tools/messages-api",
+]
+
 [dependencies]
 base64 = { workspace = true }
 codex-api = { workspace = true }

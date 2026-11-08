@@ -53,6 +53,8 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_web_search_tool;
+#[cfg(feature = "claude-code")]
+use crate::tools::multi_agent_tool::claude_delegation_handler;
 use crate::tools::multi_agent_tool::multi_agent_v2_handler;
 use crate::tools::registry::NativeReview;
 use crate::tools::registry::RegisteredTool;
@@ -149,6 +151,8 @@ pub(crate) fn build_tool_router(
     };
     let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
     add_core_tool_sources(&context, &mut registry);
+    #[cfg(feature = "claude-code")]
+    crate::claude_code::append_tools(&turn_context.config, &mut registry);
 
     let registered_mcp_tools = session.services.mcp_handler_cache.append_mcp_tools(
         mcp,
@@ -1262,6 +1266,8 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         exec_permission_approvals_enabled,
         include_environment_id,
         include_windows_shell_guidance: should_include_windows_shell_guidance(context.environments),
+        #[cfg(feature = "claude-code")]
+        background_tasks_enabled: features.enabled(Feature::ClaudeBackgroundTasks),
     };
     if features.enabled(Feature::UnifiedExec) {
         registry.add(ExecCommandHandler::new(options));
@@ -1456,6 +1462,16 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
 #[instrument(level = "trace", skip_all)]
 fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistry) {
     let turn_context = context.turn_context;
+    #[cfg(feature = "claude-code")]
+    let claude_delegation = turn_context
+        .config
+        .features
+        .enabled(Feature::ClaudeDelegation);
+    let delegation = |handler: Arc<dyn crate::tools::registry::CoreToolRuntime>| {
+        #[cfg(feature = "claude-code")]
+        let handler = claude_delegation_handler(handler, claude_delegation);
+        handler
+    };
     if collab_tools_enabled(turn_context, context.model_info) {
         if multi_agent_v2_enabled(turn_context) {
             let model_messages = ResolvedModelMessages::from_model(context.model_info);
@@ -1481,11 +1497,16 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             let hide_spawn_agent_metadata =
                 turn_context.config.multi_agent_v2.hide_spawn_agent_metadata;
             registry.register_trusted_with_native_review(
-                multi_agent_v2_handler(
+                delegation(multi_agent_v2_handler(
                     SpawnAgentHandlerV2::new(
                         SpawnAgentToolOptions {
                             available_models: turn_context.available_models.clone(),
                             multi_agent_version: turn_context.multi_agent_version,
+                            #[cfg(feature = "claude-code")]
+                            claude_delegation: turn_context
+                                .config
+                                .features
+                                .enabled(Feature::ClaudeDelegation),
                             model_catalog_in_context: turn_context
                                 .config
                                 .features
@@ -1510,62 +1531,66 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                     /*description_override*/
                     None,
                     model_messages.multi_agent_tool_parameters_override("spawn_agent"),
-                ),
+                )),
                 exposure,
                 native_review,
             );
             if !turn_context.config.multi_agent_v2.disable_direct_message {
+                if tool_namespace.is_some() || !features_messaging(turn_context) {
+                    registry.register_trusted_with_native_review(
+                        delegation(multi_agent_v2_handler(
+                            SendMessageHandlerV2,
+                            tool_namespace,
+                            model_messages.multi_agent_tool_description_override("send_message"),
+                            model_messages.multi_agent_tool_parameters_override("send_message"),
+                        )),
+                        exposure,
+                        native_review,
+                    );
+                }
                 registry.register_trusted_with_native_review(
-                    multi_agent_v2_handler(
-                        SendMessageHandlerV2,
-                        tool_namespace,
-                        model_messages.multi_agent_tool_description_override("send_message"),
-                        model_messages.multi_agent_tool_parameters_override("send_message"),
-                    ),
-                    exposure,
-                    native_review,
-                );
-                registry.register_trusted_with_native_review(
-                    multi_agent_v2_handler(
+                    delegation(multi_agent_v2_handler(
                         FollowupTaskHandlerV2,
                         tool_namespace,
                         model_messages.multi_agent_tool_description_override("followup_task"),
                         model_messages.multi_agent_tool_parameters_override("followup_task"),
-                    ),
+                    )),
                     exposure,
                     native_review,
                 );
             }
             if turn_context.config.multi_agent_v2.wait_agent_enabled {
                 registry.register_trusted_with_exposure(
-                    multi_agent_v2_handler(
+                    delegation(multi_agent_v2_handler(
                         WaitAgentHandlerV2::new(context.wait_agent_timeouts),
                         tool_namespace,
                         model_messages.multi_agent_tool_description_override("wait_agent"),
                         model_messages.multi_agent_tool_parameters_override("wait_agent"),
-                    ),
+                    )),
                     exposure,
                 );
             }
             registry.register_trusted_with_native_review(
-                multi_agent_v2_handler(
+                delegation(multi_agent_v2_handler(
                     InterruptAgentHandler,
                     tool_namespace,
                     model_messages.multi_agent_tool_description_override("interrupt_agent"),
                     model_messages.multi_agent_tool_parameters_override("interrupt_agent"),
-                ),
+                )),
                 exposure,
                 native_review,
             );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(
-                    ListAgentsHandlerV2,
-                    tool_namespace,
-                    model_messages.multi_agent_tool_description_override("list_agents"),
-                    model_messages.multi_agent_tool_parameters_override("list_agents"),
-                ),
-                exposure,
-            );
+            if tool_namespace.is_some() || !features_messaging(turn_context) {
+                registry.register_trusted_with_exposure(
+                    delegation(multi_agent_v2_handler(
+                        ListAgentsHandlerV2,
+                        tool_namespace,
+                        model_messages.multi_agent_tool_description_override("list_agents"),
+                        model_messages.multi_agent_tool_parameters_override("list_agents"),
+                    )),
+                    exposure,
+                );
+            }
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
@@ -1578,6 +1603,11 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 SpawnAgentHandler::new(SpawnAgentToolOptions {
                     available_models: turn_context.available_models.clone(),
                     multi_agent_version: turn_context.multi_agent_version,
+                    #[cfg(feature = "claude-code")]
+                    claude_delegation: turn_context
+                        .config
+                        .features
+                        .enabled(Feature::ClaudeDelegation),
                     model_catalog_in_context: turn_context
                         .config
                         .features
@@ -1590,13 +1620,26 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 }),
                 exposure,
             );
-            registry.add_with_exposure(SendInputHandler, exposure);
-            registry.add_with_exposure(ResumeAgentHandler, exposure);
             registry
-                .add_with_exposure(WaitAgentHandler::new(context.wait_agent_timeouts), exposure);
-            registry.add_with_exposure(CloseAgentHandler, exposure);
+                .register_trusted_with_exposure(delegation(Arc::new(SendInputHandler)), exposure);
+            registry
+                .register_trusted_with_exposure(delegation(Arc::new(ResumeAgentHandler)), exposure);
+            registry.register_trusted_with_exposure(
+                delegation(Arc::new(WaitAgentHandler::new(context.wait_agent_timeouts))),
+                exposure,
+            );
+            registry
+                .register_trusted_with_exposure(delegation(Arc::new(CloseAgentHandler)), exposure);
         }
     }
+}
+
+fn features_messaging(turn_context: &TurnContext) -> bool {
+    cfg!(feature = "claude-code")
+        && turn_context
+            .config
+            .features
+            .enabled(Feature::ClaudeMessaging)
 }
 
 #[instrument(level = "trace", skip_all, fields(dynamic_tool_count = dynamic_tools.len()))]

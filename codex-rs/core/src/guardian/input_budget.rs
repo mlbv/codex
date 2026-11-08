@@ -311,6 +311,10 @@ pub(crate) async fn finalize(
                                         "Unsupported Guardian input content".to_owned(),
                                     ))
                                 }
+                                #[cfg(feature = "messages-api")]
+                                ContentItem::InputFile { .. } => Err(CodexErr::InvalidRequest(
+                                    "Unsupported Guardian input content".to_owned(),
+                                )),
                             })
                             .collect::<CodexResult<Vec<_>>>()?;
                         envelope.item = session.response_item_from_user_input(user_input);

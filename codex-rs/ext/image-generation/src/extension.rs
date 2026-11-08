@@ -26,19 +26,19 @@ struct ImageGenerationExtension {
     resolve_save_root: Arc<SaveRootResolver>,
 }
 
-type SaveRootResolver = dyn Fn(&Config) -> Option<AbsolutePathBuf> + Send + Sync;
+pub(crate) type SaveRootResolver = dyn Fn(&Config) -> Option<AbsolutePathBuf> + Send + Sync;
 
 #[derive(Clone)]
-struct ImageGenerationExtensionConfig {
-    available: bool,
-    http_client_factory: HttpClientFactory,
-    provider: ModelProviderInfo,
+pub(crate) struct ImageGenerationExtensionConfig {
+    pub(crate) available: bool,
+    pub(crate) http_client_factory: HttpClientFactory,
+    pub(crate) provider: ModelProviderInfo,
     save_root: Option<AbsolutePathBuf>,
 }
 
 impl ImageGenerationExtensionConfig {
     /// Resolves the image provider and save root for a thread.
-    fn from_config(config: &Config, resolve_save_root: &SaveRootResolver) -> Self {
+    pub(crate) fn from_config(config: &Config, resolve_save_root: &SaveRootResolver) -> Self {
         Self {
             available: config.model_provider.is_openai()
                 || config.model_provider.requires_openai_auth

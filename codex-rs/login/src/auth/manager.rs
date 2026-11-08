@@ -1299,20 +1299,25 @@ impl AuthConfig {
         &self,
         enable_codex_api_key_env: bool,
     ) -> std::io::Result<Option<CodexAuth>> {
-        self.load_auth_with_modes(enable_codex_api_key_env, /*allowed_auth_modes*/ None)
-            .await
+        self.load_auth_with_modes(
+            enable_codex_api_key_env,
+            /*allowed_auth_modes*/ None,
+            /*enable_codex_access_token_env*/ true,
+        )
+        .await
     }
 
     async fn load_auth_with_modes(
         &self,
         enable_codex_api_key_env: bool,
         allowed_auth_modes: Option<&[AuthMode]>,
+        enable_codex_access_token_env: bool,
     ) -> std::io::Result<Option<CodexAuth>> {
         let allowed_login_methods = self.allowed_login_methods();
         let workspaces = self.effective_chatgpt_workspaces();
         let agent_identity_authapi_base_url =
             agent_identity_authapi_base_url(self.chatgpt_base_url.as_deref()).ok();
-        let auth = load_auth(
+        let auth = load_auth_with_sources(
             &self.codex_home,
             enable_codex_api_key_env,
             self.auth_credentials_store_mode,
@@ -1324,6 +1329,7 @@ impl AuthConfig {
             &self.auth_route_config,
             /*cached_auth*/ None,
             allowed_auth_modes,
+            enable_codex_access_token_env,
         )
         .await?;
         Ok(auth.filter(|auth| self.allows_auth(auth)))
@@ -1582,6 +1588,38 @@ async fn load_auth(
     cached_auth: Option<&CodexAuth>,
     allowed_auth_modes: Option<&[AuthMode]>,
 ) -> std::io::Result<Option<CodexAuth>> {
+    load_auth_with_sources(
+        codex_home,
+        enable_codex_api_key_env,
+        auth_credentials_store_mode,
+        allowed_login_methods,
+        forced_chatgpt_workspace_id,
+        chatgpt_base_url,
+        keyring_backend_kind,
+        agent_identity_authapi_base_url,
+        auth_route_config,
+        cached_auth,
+        allowed_auth_modes,
+        /*enable_codex_access_token_env*/ true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_auth_with_sources(
+    codex_home: &Path,
+    enable_codex_api_key_env: bool,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    allowed_login_methods: Option<&[ForcedLoginMethod]>,
+    forced_chatgpt_workspace_id: Option<&[String]>,
+    chatgpt_base_url: Option<&str>,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    agent_identity_authapi_base_url: Option<&str>,
+    auth_route_config: &AuthRouteConfig,
+    cached_auth: Option<&CodexAuth>,
+    allowed_auth_modes: Option<&[AuthMode]>,
+    enable_codex_access_token_env: bool,
+) -> std::io::Result<Option<CodexAuth>> {
     let mode_allowed = |mode| allowed_auth_modes.is_none_or(|modes| modes.contains(&mode));
     // API key via env var takes precedence over any other auth method.
     if enable_codex_api_key_env
@@ -1625,7 +1663,8 @@ async fn load_auth(
         return Ok(Some(auth));
     }
 
-    if auth_mode_is_allowed(allowed_login_methods, AuthMode::AgentIdentity)
+    if enable_codex_access_token_env
+        && auth_mode_is_allowed(allowed_login_methods, AuthMode::AgentIdentity)
         && let Some(access_token) = read_codex_access_token_from_env()
     {
         return match classify_codex_access_token(&access_token) {
@@ -2206,6 +2245,7 @@ pub struct AuthManager {
     auth_change_state_tx: watch::Sender<AuthChangeState>,
     workspace_routing_resolver: OnceLock<Weak<dyn WorkspaceRoutingResolver>>,
     enable_codex_api_key_env: bool,
+    enable_codex_access_token_env: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
     forced_login_method: Option<ForcedLoginMethod>,
@@ -2301,6 +2341,22 @@ impl AuthManager {
         self.auth_route_config.application_network_policy().clone()
     }
 
+    /// Loads an independent account from storage without process API/access tokens or workload identity.
+    pub async fn from_stored_auth(
+        auth_config: AuthConfig,
+        allowed_auth_modes: Vec<AuthMode>,
+    ) -> Arc<Self> {
+        Arc::new(
+            Self::new_from_auth_config(
+                auth_config,
+                /*enable_codex_api_key_env*/ false,
+                Some(allowed_auth_modes),
+                /*enable_codex_access_token_env*/ false,
+            )
+            .await,
+        )
+    }
+
     /// Creates content clients bound to the account currently owned by this manager.
     pub fn http_client_factory(&self) -> HttpClientFactory {
         self.auth_route_config
@@ -2334,6 +2390,7 @@ impl AuthManager {
             },
             enable_codex_api_key_env,
             /*allowed_auth_modes*/ None,
+            /*enable_codex_access_token_env*/ true,
         )
         .await
     }
@@ -2342,9 +2399,14 @@ impl AuthManager {
         auth_config: AuthConfig,
         enable_codex_api_key_env: bool,
         allowed_auth_modes: Option<Vec<AuthMode>>,
+        enable_codex_access_token_env: bool,
     ) -> Self {
         let managed_auth = auth_config
-            .load_auth_with_modes(enable_codex_api_key_env, allowed_auth_modes.as_deref())
+            .load_auth_with_modes(
+                enable_codex_api_key_env,
+                allowed_auth_modes.as_deref(),
+                enable_codex_access_token_env,
+            )
             .await
             .ok()
             .flatten();
@@ -2371,6 +2433,7 @@ impl AuthManager {
             auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
             workspace_routing_resolver: OnceLock::new(),
             enable_codex_api_key_env,
+            enable_codex_access_token_env,
             auth_credentials_store_mode,
             keyring_backend_kind,
             forced_login_method,
@@ -2409,6 +2472,7 @@ impl AuthManager {
             auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
             workspace_routing_resolver: OnceLock::new(),
             enable_codex_api_key_env: false,
+            enable_codex_access_token_env: true,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2441,6 +2505,7 @@ impl AuthManager {
             auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
             workspace_routing_resolver: OnceLock::new(),
             enable_codex_api_key_env: false,
+            enable_codex_access_token_env: true,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2477,6 +2542,7 @@ impl AuthManager {
             auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
             workspace_routing_resolver: OnceLock::new(),
             enable_codex_api_key_env: false,
+            enable_codex_access_token_env: true,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -2520,6 +2586,7 @@ impl AuthManager {
             auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
             workspace_routing_resolver: OnceLock::new(),
             enable_codex_api_key_env: false,
+            enable_codex_access_token_env: true,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_login_method: None,
@@ -3003,7 +3070,7 @@ impl AuthManager {
             .clone();
         let allowed_login_methods = self.allowed_login_methods();
         let effective_chatgpt_workspaces = self.effective_chatgpt_workspaces();
-        let auth = load_auth(
+        let auth = load_auth_with_sources(
             &self.codex_home,
             self.enable_codex_api_key_env,
             self.auth_credentials_store_mode,
@@ -3015,6 +3082,7 @@ impl AuthManager {
             &self.auth_route_config,
             cached_auth,
             allowed_auth_modes.as_deref(),
+            self.enable_codex_access_token_env,
         )
         .await?;
         Ok(auth.filter(|auth| {
@@ -3278,9 +3346,13 @@ impl AuthManager {
         allowed_auth_modes: Option<Vec<AuthMode>>,
     ) -> Result<Arc<Self>, AuthManagerInitializationError> {
         let external_auth = WorkloadIdentityExternalAuth::from_process_config(&auth_config)?;
-        let mut manager =
-            Self::new_from_auth_config(auth_config, enable_codex_api_key_env, allowed_auth_modes)
-                .await;
+        let mut manager = Self::new_from_auth_config(
+            auth_config,
+            enable_codex_api_key_env,
+            allowed_auth_modes,
+            /*enable_codex_access_token_env*/ true,
+        )
+        .await;
         manager.workload_identity_selected = external_auth.is_some();
         let manager = Arc::new(manager);
         if let Some(external_auth) = external_auth {

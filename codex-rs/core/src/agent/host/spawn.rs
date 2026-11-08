@@ -150,7 +150,7 @@ pub(super) async fn create_spawn(
         membership,
         SpawnOwner::Host,
     );
-    child.thread.emit_thread_ready_lifecycle().await;
+    child.thread.emit_thread_ready_lifecycle().await?;
     child
         .thread
         .emit_subagent_session_started(client_metadata, /*resumed_created_at*/ None)

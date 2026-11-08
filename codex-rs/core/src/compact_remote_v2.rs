@@ -722,6 +722,8 @@ fn message_text_token_count(item: &ResponseItem) -> usize {
                 approx_token_count(text)
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => 0,
+            #[cfg(feature = "messages-api")]
+            ContentItem::InputFile { .. } => 0,
         })
         .sum()
 }
@@ -753,6 +755,10 @@ fn truncate_message_text_to_token_budget(
                 }
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
+                truncated_content.push(content_item);
+            }
+            #[cfg(feature = "messages-api")]
+            ContentItem::InputFile { .. } => {
                 truncated_content.push(content_item);
             }
         }

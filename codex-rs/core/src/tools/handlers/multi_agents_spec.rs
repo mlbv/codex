@@ -33,6 +33,8 @@ pub struct SpawnAgentToolOptions {
     pub multi_agent_version: MultiAgentVersion,
     pub model_catalog_in_context: bool,
     pub usage_hint_text: Option<String>,
+    #[cfg(feature = "claude-code")]
+    pub claude_delegation: bool,
 }
 
 impl Default for SpawnAgentToolOptions {
@@ -46,6 +48,8 @@ impl Default for SpawnAgentToolOptions {
             multi_agent_version: MultiAgentVersion::Disabled,
             model_catalog_in_context: false,
             usage_hint_text: None,
+            #[cfg(feature = "claude-code")]
+            claude_delegation: false,
         }
     }
 }
@@ -84,7 +88,17 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
     if options.hide_agent_type_model_reasoning {
         hide_spawn_agent_metadata_options(&mut properties);
     }
+    #[cfg(feature = "claude-code")]
+    if options.claude_delegation {
+        add_claude_delegation_properties(&mut properties);
+    }
 
+    let usage_hint = options.usage_hint_text;
+    #[cfg(feature = "claude-code")]
+    let usage_hint = delegation_usage_hint(usage_hint, options.claude_delegation);
+    let output_schema = spawn_agent_output_schema_v1();
+    #[cfg(feature = "claude-code")]
+    let output_schema = delegation_output_schema(output_schema, options.claude_delegation);
     ToolSpec::Namespace(ResponsesApiNamespace {
         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
@@ -95,12 +109,12 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
                 options.model_catalog_in_context,
                 inherited_model_guidance,
                 return_value_description,
-                options.usage_hint_text,
+                usage_hint,
             ),
             strict: false,
             defer_loading: None,
             parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
-            output_schema: Some(spawn_agent_output_schema_v1().into()),
+            output_schema: Some(output_schema.into()),
         })],
     })
 }
@@ -138,6 +152,16 @@ pub fn create_spawn_agent_tool_v2(
         )),
     );
 
+    #[cfg(feature = "claude-code")]
+    if options.claude_delegation {
+        add_claude_delegation_properties(&mut properties);
+    }
+    let usage_hint = options.usage_hint_text;
+    #[cfg(feature = "claude-code")]
+    let usage_hint = delegation_usage_hint(usage_hint, options.claude_delegation);
+    let output_schema = spawn_agent_output_schema_v2(options.hide_agent_type_model_reasoning);
+    #[cfg(feature = "claude-code")]
+    let output_schema = delegation_output_schema(output_schema, options.claude_delegation);
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_agent".to_string(),
         description: spawn_agent_tool_description_v2(
@@ -147,7 +171,7 @@ pub fn create_spawn_agent_tool_v2(
                 .expose_spawn_agent_model_overrides
                 .then_some(SPAWN_AGENT_MODEL_CATALOG_GUIDANCE),
             inherited_model_guidance,
-            options.usage_hint_text,
+            usage_hint,
             description_override,
         ),
         strict: false,
@@ -157,9 +181,7 @@ pub fn create_spawn_agent_tool_v2(
             Some(vec!["task_name".to_string(), "message".to_string()]),
             Some(false.into()),
         ),
-        output_schema: Some(
-            spawn_agent_output_schema_v2(options.hide_agent_type_model_reasoning).into(),
-        ),
+        output_schema: Some(output_schema.into()),
     })
 }
 
@@ -410,6 +432,108 @@ fn agent_status_output_schema() -> Value {
             }
         ]
     })
+}
+
+#[cfg(feature = "claude-code")]
+pub(crate) fn apply_claude_delegation_extensions(tool: &mut ResponsesApiTool) {
+    match tool.name.as_str() {
+        "spawn_agent" => {
+            add_claude_delegation_properties(tool.parameters.properties.as_mut().unwrap());
+            if !tool.description.contains("run_in_background=false") {
+                tool.description =
+                    delegation_usage_hint(Some(tool.description.clone()), true).unwrap();
+            }
+            let schema = tool.output_schema.as_ref().unwrap().to_value();
+            tool.output_schema = Some(delegation_output_schema(schema, true).into());
+        }
+        "send_input" => {
+            tool.description.push_str(" Targets also accept teammate names and canonical task paths. Use main to wake the main conversation, or * to broadcast to other active named teammates.");
+            let single = tool.output_schema.as_ref().unwrap().to_value();
+            tool.output_schema = Some(json!({"anyOf":[single,{
+                "type":"object",
+                "properties":{"submissions":{"type":"object","additionalProperties":{"type":"string"}}},
+                "required":["submissions"],
+                "additionalProperties":false
+            }]}).into());
+        }
+        "send_message" => {
+            tool.description = tool.description.replace(
+                "Does not trigger a new turn.",
+                "Queues messages for child agents; a message to main wakes the main conversation.",
+            );
+            tool.description.push_str(" Targets also accept teammate names. Use main for the main conversation, or * to broadcast to other active named teammates. Use followup_task to wake an idle child.");
+        }
+        "followup_task" => {
+            tool.description = tool
+                .description
+                .replace("existing non-root target agent", "existing target agent");
+            tool.description.push_str(" Targets also accept teammate names. Use main to wake the main conversation, or * to broadcast to other active named teammates.");
+        }
+        "resume_agent" | "close_agent" | "wait_agent" => {
+            tool.description
+                .push_str(" Agent targets also accept teammate names and canonical task paths.");
+        }
+        _ => return,
+    }
+    if let Some(properties) = tool.parameters.properties.as_mut() {
+        for key in ["target", "id"] {
+            if let Some(target) = properties.get_mut(key) {
+                target.description =
+                    Some("Native agent ID, teammate name, or canonical task path.".into());
+            }
+        }
+    }
+}
+
+#[cfg(feature = "claude-code")]
+fn add_claude_delegation_properties(properties: &mut BTreeMap<String, JsonSchema>) {
+    properties.insert(
+        "name".to_string(),
+        JsonSchema::string(Some(
+            "Persistent teammate name. Native agent tools accept this name as a target. A new agent with the same name takes over the alias.".to_string(),
+        )),
+    );
+    properties.insert(
+        "run_in_background".to_string(),
+        JsonSchema::boolean(Some(
+            "Defaults to true: return immediately and deliver completion automatically. False waits for the agent and its pending background work. Named teammates must use false when spawning nested agents.".to_string(),
+        )),
+    );
+}
+
+#[cfg(feature = "claude-code")]
+fn delegation_usage_hint(hint: Option<String>, enabled: bool) -> Option<String> {
+    if !enabled {
+        return hint;
+    }
+    let guidance = "Agents run in the background by default and notify you automatically when finished. Set run_in_background=false to await the result, including pending background work. Use name to create a persistent teammate for shared tasks and later native messages.";
+    Some(match hint {
+        Some(hint) => format!("{hint}\n{guidance}"),
+        None => guidance.to_string(),
+    })
+}
+
+#[cfg(feature = "claude-code")]
+fn delegation_output_schema(mut schema: Value, enabled: bool) -> Value {
+    if enabled {
+        let properties = schema["properties"].as_object_mut().unwrap();
+        properties.insert("agent_id".to_string(), json!({"type":"string"}));
+        properties.insert("nickname".to_string(), json!({"type":["string","null"]}));
+        properties.insert("name".to_string(), json!({"type":"string"}));
+        properties.insert(
+            "status".to_string(),
+            json!({"type":"string","enum":["background","completed"]}),
+        );
+        properties.insert("result".to_string(), json!({"type":"object","properties":{"text":{"type":["string","null"]}},"required":["text"],"additionalProperties":false}));
+        let required = schema["required"].as_array_mut().unwrap();
+        if !required.contains(&json!("status")) {
+            required.push(json!("status"));
+        }
+        if !required.contains(&json!("agent_id")) {
+            required.push(json!("agent_id"));
+        }
+    }
+    schema
 }
 
 fn spawn_agent_output_schema_v1() -> Value {

@@ -116,6 +116,14 @@ pub enum Feature {
     SleepTool,
     /// Enable Claude-style lifecycle hooks loaded from hooks.json files.
     CodexHooks,
+    /// Read and update Claude Code's shared memory files.
+    ClaudeMemory,
+    /// Exchange messages with local Claude Code sessions.
+    ClaudeMessaging,
+    /// Expose background shell tasks and streaming monitors.
+    ClaudeBackgroundTasks,
+    /// Expose named agents, teammates, and a shared task list.
+    ClaudeDelegation,
     /// Store CLI auth in the encrypted local secrets backend when keyring storage is selected.
     SecretAuthStorage,
 
@@ -1086,6 +1094,30 @@ pub struct FeatureSpec {
 }
 
 pub const FEATURES: &[FeatureSpec] = &[
+    FeatureSpec {
+        id: Feature::ClaudeMemory,
+        key: "claude_memory",
+        stage: Stage::Stable,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ClaudeMessaging,
+        key: "claude_messaging",
+        stage: Stage::Stable,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ClaudeBackgroundTasks,
+        key: "claude_background_tasks",
+        stage: Stage::Stable,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ClaudeDelegation,
+        key: "claude_delegation",
+        stage: Stage::Stable,
+        default_enabled: false,
+    },
     FeatureSpec {
         id: Feature::AnalyticsPlanHistory,
         key: "analytics_plan_history",

@@ -579,6 +579,18 @@ async fn dropped_pending_observer_preserves_the_frontier_for_the_next_observatio
     harness
         .event_tx
         .blocking_send(RuntimeEvent::ToolCall {
+            id: "completed-tool".to_string(),
+            name: codex_protocol::ToolName {
+                name: "echo".to_string(),
+                namespace: None,
+            },
+            kind: codex_code_mode_protocol::CodeModeToolKind::Function,
+            input: Some(serde_json::json!({})),
+        })
+        .unwrap();
+    harness
+        .event_tx
+        .blocking_send(RuntimeEvent::ToolCall {
             id: "tool-1".to_string(),
             name: codex_protocol::ToolName {
                 name: "echo".to_string(),
@@ -590,7 +602,9 @@ async fn dropped_pending_observer_preserves_the_frontier_for_the_next_observatio
         .unwrap();
     harness
         .event_tx
-        .blocking_send(RuntimeEvent::Pending)
+        .blocking_send(RuntimeEvent::Pending {
+            tool_call_ids: ["tool-1".to_string()].into_iter().collect(),
+        })
         .unwrap();
     harness
         .event_tx

@@ -1685,7 +1685,9 @@ impl Config {
     }
 
     pub(crate) fn multi_agent_version_override(&self) -> Option<MultiAgentVersion> {
-        if self.features.enabled(Feature::MultiAgentV2) {
+        if self.features.enabled(Feature::MultiAgentV2)
+            || (cfg!(feature = "claude-code") && self.features.enabled(Feature::ClaudeDelegation))
+        {
             Some(MultiAgentVersion::V2)
         } else if !self.agents_enabled {
             Some(MultiAgentVersion::Disabled)

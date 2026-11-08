@@ -584,6 +584,8 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
             },
             ContentItem::InputAudio { audio: reference } => audio.push(reference),
             ContentItem::OutputText { .. } => return false,
+            #[cfg(feature = "messages-api")]
+            ContentItem::InputFile { .. } => return false,
         }
     }
     text == event.message

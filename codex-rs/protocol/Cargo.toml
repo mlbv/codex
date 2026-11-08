@@ -12,6 +12,9 @@ doctest = false
 [lints]
 workspace = true
 
+[features]
+messages-api = []
+
 [dependencies]
 chardetng = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }

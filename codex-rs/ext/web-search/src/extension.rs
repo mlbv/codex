@@ -20,13 +20,13 @@ use codex_extension_api::ToolContributor;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_model_provider::WorkspaceRoutingContext;
-use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::config_types::WebSearchContextSize;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::openai_models::ModelInfo;
 
 use crate::schema::LITERATURE_SEARCH_QUERY;
+use crate::search::StandaloneSearch;
 use crate::tool::WebSearchTool;
 
 #[derive(Clone)]
@@ -35,11 +35,11 @@ struct WebSearchExtension {
 }
 
 #[derive(Clone)]
-struct WebSearchExtensionConfig {
-    provider_supports_search: bool,
-    http_client_factory: HttpClientFactory,
-    provider: ModelProviderInfo,
-    settings: SearchSettings,
+pub(crate) struct WebSearchExtensionConfig {
+    pub(crate) provider_supports_search: bool,
+    pub(crate) http_client_factory: HttpClientFactory,
+    pub(crate) provider: ModelProviderInfo,
+    pub(crate) settings: SearchSettings,
 }
 
 impl From<&Config> for WebSearchExtensionConfig {
@@ -85,7 +85,7 @@ fn search_settings(config: &Config) -> SearchSettings {
     }
 }
 
-fn external_web_access_for_mode(web_search_mode: WebSearchMode) -> ExternalWebAccess {
+pub(crate) fn external_web_access_for_mode(web_search_mode: WebSearchMode) -> ExternalWebAccess {
     match web_search_mode {
         WebSearchMode::Disabled | WebSearchMode::Cached => ExternalWebAccess::Boolean(false),
         WebSearchMode::Indexed => ExternalWebAccess::Mode(ExternalWebAccessMode::Indexed),
@@ -140,16 +140,12 @@ impl ToolContributor for WebSearchExtension {
 
         vec![Arc::new(WebSearchTool {
             session_id: session_store.level_id().to_string(),
-            http_client_factory: config.http_client_factory.clone(),
-            provider: create_model_provider(
-                config.provider.clone(),
-                Some(self.auth_manager.clone()),
+            search: StandaloneSearch::new(
+                &config,
+                self.auth_manager.clone(),
+                workspace_routing,
+                *mode,
             ),
-            workspace_routing,
-            settings: SearchSettings {
-                external_web_access: Some(external_web_access_for_mode(*mode)),
-                ..config.settings.clone()
-            },
             supports_literature_search: step_store.get::<ModelInfo>().is_some_and(|model| {
                 model
                     .experimental_supported_tools
@@ -191,8 +187,8 @@ mod tests {
     use super::WebSearchExtensionConfig;
     use super::external_web_access_for_mode;
     use super::install;
-    use crate::tool::RUN_TOOL_NAME;
-    use crate::tool::WEB_NAMESPACE;
+    use crate::search::RUN_TOOL_NAME;
+    use crate::search::WEB_NAMESPACE;
     use codex_api::ExternalWebAccess;
     use codex_api::ExternalWebAccessMode;
     use codex_protocol::config_types::WebSearchMode;

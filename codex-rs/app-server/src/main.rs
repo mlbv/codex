@@ -7,7 +7,7 @@ use codex_app_server::AppServerTransport;
 use codex_app_server::PluginStartupTasks;
 use codex_app_server::run_main_with_transport_options;
 use codex_arg0::Arg0DispatchPaths;
-use codex_arg0::arg0_dispatch_or_else;
+use codex_arg0::arg0_dispatch_or_else_with_startup;
 use codex_config::LoaderOverrides;
 use codex_protocol::protocol::SessionSource;
 use codex_utils_cli::CliConfigOverrides;
@@ -80,65 +80,80 @@ struct AppServerArgs {
 }
 
 fn main() -> anyhow::Result<()> {
-    let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
-    arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
-        let AppServerArgs {
-            cloud_skills_snapshot,
-            config_overrides,
-            code_mode_host,
-            listen,
-            session_source,
-            auth,
-            strict_config,
-            #[cfg(debug_assertions)]
-            disable_plugin_startup_tasks_for_tests,
-            remote_control,
-            managed_daemon,
-        } = AppServerArgs::parse();
-        let loader_overrides = if disable_managed_config_from_debug_env() {
-            LoaderOverrides::without_managed_config_for_tests()
-        } else {
-            managed_config_path_from_debug_env()
-                .map(LoaderOverrides::with_managed_config_path_for_tests)
-                .unwrap_or_default()
-        };
-        let transport = listen;
-        let auth = auth.try_into_settings()?;
-        let mut runtime_options = AppServerRuntimeOptions {
-            cloud_skills_snapshot,
-            code_mode_host_transport: code_mode_host.into(),
-            managed_daemon,
-            ..Default::default()
-        };
-        #[cfg(debug_assertions)]
-        if disable_plugin_startup_tasks_for_tests {
-            runtime_options.plugin_startup_tasks = PluginStartupTasks::Skip;
-        }
-        runtime_options.remote_control_startup_mode =
-            match (remote_control, remote_control_disabled) {
-                (true, _) => codex_app_server::RemoteControlStartupMode::EnabledEphemeral,
-                (false, true) => codex_app_server::RemoteControlStartupMode::DisabledEphemeral,
-                (false, false) => codex_app_server::RemoteControlStartupMode::ResolvePersisted,
+    arg0_dispatch_or_else_with_startup(
+        || Ok(codex_app_server::take_remote_control_disabled_env()),
+        move |arg0_paths: Arg0DispatchPaths, remote_control_disabled| async move {
+            #[cfg(feature = "claude-code")]
+            {
+                let mut args = std::env::args_os().skip(1);
+                if args.next().as_deref() == Some(std::ffi::OsStr::new("claude-code-bridge")) {
+                    let args = args
+                        .map(|arg| {
+                            arg.into_string()
+                                .map_err(|_| anyhow::anyhow!("bridge arguments must be UTF-8"))
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?;
+                    return codex_core::claude_code::run_bridge(args).await;
+                }
+            }
+            let AppServerArgs {
+                cloud_skills_snapshot,
+                config_overrides,
+                code_mode_host,
+                listen,
+                session_source,
+                auth,
+                strict_config,
+                #[cfg(debug_assertions)]
+                disable_plugin_startup_tasks_for_tests,
+                remote_control,
+                managed_daemon,
+            } = AppServerArgs::parse();
+            let loader_overrides = if disable_managed_config_from_debug_env() {
+                LoaderOverrides::without_managed_config_for_tests()
+            } else {
+                managed_config_path_from_debug_env()
+                    .map(LoaderOverrides::with_managed_config_path_for_tests)
+                    .unwrap_or_default()
             };
+            let transport = listen;
+            let auth = auth.try_into_settings()?;
+            let mut runtime_options = AppServerRuntimeOptions {
+                cloud_skills_snapshot,
+                code_mode_host_transport: code_mode_host.into(),
+                managed_daemon,
+                ..Default::default()
+            };
+            #[cfg(debug_assertions)]
+            if disable_plugin_startup_tasks_for_tests {
+                runtime_options.plugin_startup_tasks = PluginStartupTasks::Skip;
+            }
+            runtime_options.remote_control_startup_mode =
+                match (remote_control, remote_control_disabled) {
+                    (true, _) => codex_app_server::RemoteControlStartupMode::EnabledEphemeral,
+                    (false, true) => codex_app_server::RemoteControlStartupMode::DisabledEphemeral,
+                    (false, false) => codex_app_server::RemoteControlStartupMode::ResolvePersisted,
+                };
 
-        let exit = run_main_with_transport_options(
-            arg0_paths,
-            config_overrides,
-            loader_overrides,
-            strict_config,
-            /*default_analytics_enabled*/ false,
-            transport,
-            session_source,
-            auth,
-            runtime_options,
-        )
-        .await?;
-        if exit == codex_app_server::AppServerExit::Forced {
-            // Runtime teardown can wait forever for blocked rollout I/O.
-            std::process::exit(0);
-        }
-        Ok(())
-    })
+            let exit = run_main_with_transport_options(
+                arg0_paths,
+                config_overrides,
+                loader_overrides,
+                strict_config,
+                /*default_analytics_enabled*/ false,
+                transport,
+                session_source,
+                auth,
+                runtime_options,
+            )
+            .await?;
+            if exit == codex_app_server::AppServerExit::Forced {
+                // Runtime teardown can wait forever for blocked rollout I/O.
+                std::process::exit(0);
+            }
+            Ok(())
+        },
+    )
 }
 
 fn disable_managed_config_from_debug_env() -> bool {

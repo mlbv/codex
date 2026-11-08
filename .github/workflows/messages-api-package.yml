@@ -1,0 +1,247 @@
+name: Build Messages API for Windows
+
+on:
+  push:
+    branches: ['patch/**']
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Published upstream release tag; leave empty for the latest stable release
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    if: github.repository == 'mlbv/codex'
+    runs-on: windows-2025
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      LIBSQLITE3_FLAGS: SQLITE_DISABLE_INTRINSIC
+      RUST_MIN_STACK: "8388608"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_IDLE_TIMEOUT: "0"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Enable Git long paths
+        shell: pwsh
+        run: git config --global core.longpaths true
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Select upstream release for branch push
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          @'
+          import os
+          import tomllib
+
+          with open("codex-rs/Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["workspace"]["package"]["version"]
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              print(f"UPSTREAM_TAG=rust-v{version}", file=output)
+          '@ | python -
+
+      - name: Check product build tooling
+        run: python -B -m unittest discover -s scripts -p 'test_daemon_*.py' -v
+
+      - name: Resolve published upstream release
+        run: python scripts/daemon_release.py resolve --output artifacts
+
+      - name: Resolve release identity and cache inputs
+        id: source
+        shell: pwsh
+        run: |
+          $tag = python -c "import json; print(json.load(open('artifacts/release.json'))['tag'])"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git fetch --no-tags https://github.com/openai/codex.git "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+          import tomllib
+          sys.path.insert(0, "scripts")
+          from daemon_release import unified_source
+
+          release = json.loads(Path("artifacts/release.json").read_text(encoding="utf-8"))
+          tag = release["tag"]
+          version = release["version"]
+          manifest = tomllib.loads(Path("codex-rs/Cargo.toml").read_text())
+          if manifest["workspace"]["package"]["version"] != version:
+              raise RuntimeError("Workspace version must match the selected published release")
+          parent = subprocess.check_output(["git", "rev-parse", "HEAD^"], text=True).strip()
+          upstream = subprocess.check_output(["git", "rev-parse", "FETCH_HEAD^{commit}"], text=True).strip()
+          if parent != upstream or upstream != release["commit"]:
+              raise RuntimeError("The fork commit must be directly based on the selected release")
+          audit = unified_source(Path.cwd(), release)
+          Path("artifacts/source-audit.json").write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
+          embedded = subprocess.check_output([
+              "git", "ls-files", "--stage", "-z", "--",
+              "codex-rs/skills/src/assets", ":(glob)codex-rs/state/*migrations/**",
+          ])
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
+              print(f"UPSTREAM_TAG={tag}", file=output)
+              print(f"EXPECTED_VERSION={version}", file=output)
+              print("SCCACHE_GHA_VERSION=messages-api-windows-nolto-v1-" + hashlib.sha256(embedded).hexdigest(), file=output)
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              print("v8-cache=" + str(Path(tempfile.gettempdir()) / "codex-package"), file=output)
+          '@ | python -
+
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${{ steps.source.outputs.v8-cache }}
+          key: messages-api-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('codex-rs/Cargo.lock') }}
+          restore-keys: |
+            messages-api-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
+            daemon-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - uses: ./.github/actions/setup-msvc-env
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Install release toolchain
+        shell: pwsh
+        run: |
+          $channel = python -c "import tomllib; print(tomllib.load(open('codex-rs/rust-toolchain.toml', 'rb'))['toolchain']['channel'])"
+          rustup toolchain install $channel --profile minimal --no-self-update
+
+      - uses: ./.github/actions/setup-sccache
+        with:
+          version: v0.16.0
+
+      - name: Configure official V8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Audit API dependency features
+        run: python scripts/daemon_product_features.py --product messages-api --target x86_64-pc-windows-msvc --output artifacts
+
+      - name: Test API response parser behavior
+        working-directory: codex-rs
+        run: cargo test --locked --profile ci-test --lib -p codex-api --no-default-features --features messages-api --target x86_64-pc-windows-msvc parses_tool_call_input_deltas
+
+      - name: Test startup environment parsing
+        working-directory: codex-rs
+        run: cargo test --locked --profile ci-test --lib -p codex-arg0 --target x86_64-pc-windows-msvc startup_env
+
+      - name: Test independent stored authentication
+        working-directory: codex-rs
+        run: cargo test --locked --profile ci-test --lib -p codex-login --target x86_64-pc-windows-msvc stored_auth_ignores_process_credentials_on_load_and_reload
+
+      - name: Test Messages API
+        working-directory: codex-rs
+        run: cargo test --locked --profile ci-test --lib -p codex-messages-api --target x86_64-pc-windows-msvc
+
+      - name: Remove test build outputs
+        working-directory: codex-rs
+        run: cargo clean --profile ci-test
+
+      - name: Build Messages API release executable
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, "scripts")
+          from daemon_product_features import audit_build_features
+          from daemon_release import run_logged, runner_environment
+
+          output = Path("artifacts").resolve()
+          run_logged([
+              "cargo", "build", "--locked", "--release", "-p", "codex-cli",
+              "--bin", "codex", "--target", "x86_64-pc-windows-msvc",
+              "--no-default-features", "--features", "messages-api",
+              "--message-format=json-render-diagnostics",
+          ], output / "build.log", Path.cwd(), runner_environment(),
+             event_path=output / "build.jsonl")
+          (output / "product-build-features.json").write_text(
+              json.dumps(audit_build_features(output / "build.jsonl", "messages-api"), indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+      - name: Package and check offline entry points
+        shell: pwsh
+        run: |
+          @'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          destination = Path("artifact")
+          destination.mkdir()
+          binary = destination / "codex.exe"
+          shutil.copy2("codex-rs/target/x86_64-pc-windows-msvc/release/codex.exe", binary)
+          expected = "codex-cli " + os.environ["EXPECTED_VERSION"]
+          reported = subprocess.check_output([str(binary.resolve()), "--version"], text=True).strip()
+          if reported != expected:
+              raise RuntimeError(f"Unexpected executable version: {reported}")
+          # The daemon intercepts this word before argument parsing; without the bridge it is a
+          # prompt, so `--help` prints the CLI's own usage.
+          bridge = subprocess.run([str(binary.resolve()), "claude-code-bridge", "--help"], capture_output=True, text=True, timeout=15)
+          if bridge.returncode != 0 or "Usage:" not in bridge.stdout:
+              raise RuntimeError("The API executable must not expose the native peer bridge")
+          with (destination / "messages-api-help.txt").open("w", encoding="utf-8") as output:
+              subprocess.run([str(binary.resolve()), "messages-api", "--help"], check=True, stdout=output)
+          subprocess.run(["python", "-I", "scripts/messages_api_auth_smoke.py", str(binary.resolve())], check=True)
+          with binary.open("rb") as source:
+              digest = hashlib.file_digest(source, "sha256").hexdigest()
+          metadata = {
+              "version": os.environ["EXPECTED_VERSION"],
+              "upstream_tag": os.environ["UPSTREAM_TAG"],
+              "source_commit": os.environ["GITHUB_SHA"],
+              "target": "x86_64-pc-windows-msvc",
+              "release_lto": os.environ["CARGO_PROFILE_RELEASE_LTO"],
+              "binary_sha256": digest,
+              "product": "messages-api",
+              "cargo_features": ["codex-cli/messages-api"],
+              "native_peer_bridge_absent": True,
+          }
+          (destination / "build.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+          '@ | python -
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-messages-api-${{ env.EXPECTED_VERSION }}-windows
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload source and feature evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: messages-api-build-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7

@@ -11,6 +11,10 @@ pub(crate) async fn resolve_agent_target(
     turn: &Arc<TurnContext>,
     target: &str,
 ) -> Result<ThreadId, FunctionCallError> {
+    #[cfg(feature = "claude-code")]
+    if let Some(id) = crate::claude_code::delegation::resolve_alias(session, target).await {
+        return Ok(id);
+    }
     session
         .services
         .agent_control

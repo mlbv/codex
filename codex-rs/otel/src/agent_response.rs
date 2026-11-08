@@ -79,6 +79,8 @@ impl AgentResponseLogger {
                 ContentItem::InputText { .. }
                 | ContentItem::InputImage { .. }
                 | ContentItem::InputAudio { .. } => None,
+                #[cfg(feature = "messages-api")]
+                ContentItem::InputFile { .. } => None,
             })
             .collect::<String>();
         // Keep plan content, stripping memory citations only from the exported copy.

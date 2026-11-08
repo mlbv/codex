@@ -7,6 +7,9 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+messages-api = ["codex-protocol/messages-api"]
+
 [dependencies]
 codex-protocol = { workspace = true }
 codex-utils-string = { workspace = true }

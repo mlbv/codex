@@ -316,6 +316,10 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
     if let Some(startup_prewarm) = startup_prewarm {
         startup_prewarm.abort().await;
     }
+    #[cfg(feature = "claude-code")]
+    if let Err(error) = crate::claude_code::shutdown(sess).await {
+        crate::claude_code::report_error(sess, error).await;
+    }
     let _ = sess.conversation.shutdown().await;
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
     super::async_compaction::shutdown(sess).await;

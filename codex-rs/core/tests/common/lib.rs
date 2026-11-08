@@ -396,6 +396,7 @@ pub async fn wait_for_event_with_timeout<F>(
 where
     F: FnMut(&codex_protocol::protocol::EventMsg) -> bool,
 {
+    use codex_protocol::protocol::EventMsg;
     use tokio::time::Duration;
     use tokio::time::timeout;
     loop {
@@ -404,6 +405,17 @@ where
             .await
             .expect("timeout waiting for event")
             .expect("stream ended unexpectedly");
+        match &ev.msg {
+            EventMsg::Error(event) => eprintln!("Error while waiting: {}", event.message),
+            EventMsg::Warning(event) => eprintln!("Warning while waiting: {}", event.message),
+            EventMsg::TurnStarted(event) => eprintln!("Turn started: {}", event.turn_id),
+            EventMsg::TurnComplete(event) => eprintln!("Turn completed: {}", event.turn_id),
+            EventMsg::ExecCommandBegin(event) => eprintln!("Command started: {}", event.call_id),
+            EventMsg::ExecCommandEnd(event) => {
+                eprintln!("Command completed: {} ({})", event.call_id, event.exit_code);
+            }
+            _ => {}
+        }
         if predicate(&ev.msg) {
             return ev.msg;
         }

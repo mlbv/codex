@@ -6,6 +6,16 @@ license.workspace = true
 build = "build.rs"
 default-run = "codex"
 
+[features]
+default = ["daemon"]
+daemon = ["codex-core/claude-code", "codex-app-server/claude-code"]
+messages-api = [
+    "dep:codex-messages-api",
+    "codex-core/messages-api",
+    "codex-app-server/messages-api",
+    "codex-memories-write/messages-api",
+]
+
 [[bin]]
 name = "codex"
 path = "src/main.rs"
@@ -67,6 +77,7 @@ codex-models-manager = { workspace = true }
 codex-plugin = { workspace = true }
 codex-protocol = { workspace = true }
 codex-responses-api-proxy = { workspace = true }
+codex-messages-api = { workspace = true, optional = true }
 codex-tcp-tunnel = { workspace = true }
 codex-rmcp-client = { workspace = true }
 codex-rollout = { workspace = true }

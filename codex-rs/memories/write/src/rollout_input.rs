@@ -138,6 +138,12 @@ pub(crate) fn serialize_tiered_input(
                             text: "[audio omitted]".into(),
                         };
                     }
+                    #[cfg(feature = "messages-api")]
+                    ContentItem::InputFile { .. } => {
+                        *part = ContentItem::InputText {
+                            text: "[file omitted]".into(),
+                        };
+                    }
                     ContentItem::InputText { .. } | ContentItem::OutputText { .. } => {}
                 }
             }

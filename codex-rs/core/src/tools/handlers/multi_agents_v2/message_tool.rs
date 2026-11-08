@@ -54,48 +54,74 @@ pub(super) async fn handle_message_string_tool(
         source,
         ..
     } = invocation;
-    let receiver_thread_id = resolve_agent_target(&session, &turn, &target).await?;
-    analytics.set_receiver(receiver_thread_id);
+    let broadcast = cfg!(feature = "claude-code")
+        && session.enabled(codex_features::Feature::ClaudeDelegation)
+        && target == "*";
+    #[cfg(feature = "claude-code")]
+    let receivers = if broadcast {
+        crate::claude_code::delegation::native_message_targets(
+            &session,
+            &turn.session_source,
+            &target,
+        )
+        .await
+        .unwrap()
+    } else {
+        vec![resolve_agent_target(&session, &turn, &target).await?]
+    };
+    #[cfg(not(feature = "claude-code"))]
+    let receivers = vec![resolve_agent_target(&session, &turn, &target).await?];
     let resume_config =
         build_agent_resume_config(&turn).map_err(FunctionCallError::RespondToModel)?;
-    let receipt = session
-        .services
-        .agent_control
-        .send(SendRequest {
-            caller: session.thread_id,
-            target: AgentTarget::Id(receiver_thread_id),
-            resume_config,
-            input: AgentInput::Message {
-                message: agent_message_from_tool(message, &source),
-                mode,
+    analytics.set_receivers(receivers.clone());
+    for receiver_thread_id in receivers {
+        #[cfg(feature = "claude-code")]
+        if mode == MessageDeliveryMode::TriggerTurn {
+            crate::claude_code::delegation::native_followup(&session, receiver_thread_id).await?;
+        }
+        let receipt = session
+            .services
+            .agent_control
+            .send(SendRequest {
+                caller: session.thread_id,
+                target: AgentTarget::Id(receiver_thread_id),
+                resume_config: resume_config.clone(),
+                input: AgentInput::Message {
+                    message: agent_message_from_tool(message.clone(), &source),
+                    mode,
+                },
+                start_options: TurnStartOptions {
+                    parent_turn_id: (mode == MessageDeliveryMode::TriggerTurn)
+                        .then(|| turn.sub_id.clone()),
+                    root_turn_id: turn.turn_metadata_state.root_turn_id(),
+                    turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
+                    cyber_access_program: turn.cyber_access_program,
+                    ..Default::default()
+                },
+            })
+            .await
+            .map_err(|err| collab_v2_agent_error(receiver_thread_id, err))?;
+        let receiver_agent_path = receipt.metadata.agent_path.ok_or_else(|| {
+            FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
+        })?;
+        emit_sub_agent_activity(
+            &session,
+            &turn,
+            SubAgentActivityItem {
+                model: None,
+                reasoning_effort: None,
+                id: if broadcast {
+                    format!("{call_id}-{receiver_thread_id}")
+                } else {
+                    call_id.clone()
+                },
+                agent_thread_id: receiver_thread_id,
+                agent_path: receiver_agent_path,
+                kind: SubAgentActivityKind::Interacted,
             },
-            start_options: TurnStartOptions {
-                parent_turn_id: (mode == MessageDeliveryMode::TriggerTurn)
-                    .then(|| turn.sub_id.clone()),
-                root_turn_id: turn.turn_metadata_state.root_turn_id(),
-                turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
-                cyber_access_program: turn.cyber_access_program,
-                ..Default::default()
-            },
-        })
-        .await
-        .map_err(|err| collab_v2_agent_error(receiver_thread_id, err))?;
-    let receiver_agent_path = receipt.metadata.agent_path.ok_or_else(|| {
-        FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
-    })?;
-    emit_sub_agent_activity(
-        &session,
-        &turn,
-        SubAgentActivityItem {
-            model: None,
-            reasoning_effort: None,
-            id: call_id,
-            agent_thread_id: receiver_thread_id,
-            agent_path: receiver_agent_path,
-            kind: SubAgentActivityKind::Interacted,
-        },
-    )
-    .await;
+        )
+        .await;
+    }
 
     Ok(FunctionToolOutput::from_text(String::new(), Some(true)))
 }

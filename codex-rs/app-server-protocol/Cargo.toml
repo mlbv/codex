@@ -12,6 +12,12 @@ doctest = false
 [lints]
 workspace = true
 
+[features]
+messages-api = [
+    "codex-protocol/messages-api",
+    "codex-rollout/messages-api",
+]
+
 [dependencies]
 anyhow = { workspace = true }
 codex-experimental-api-macros = { workspace = true }

@@ -12,6 +12,12 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+messages-api = [
+    "codex-protocol/messages-api",
+    "codex-utils-output-truncation/messages-api",
+]
+
 [dependencies]
 base64 = { workspace = true }
 codex-code-mode-protocol = { workspace = true }

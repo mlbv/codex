@@ -22,6 +22,8 @@ pub(super) fn content_item_token_count(item: &ContentItem) -> usize {
         )
         .unwrap_or(usize::MAX),
         ContentItem::InputAudio { .. } => 0,
+        #[cfg(feature = "messages-api")]
+        ContentItem::InputFile { .. } => 0,
     }
 }
 
@@ -88,6 +90,8 @@ pub(super) fn truncate_message_to_token_budget(
                 }
             }
             ContentItem::InputAudio { .. } => retained.push(item),
+            #[cfg(feature = "messages-api")]
+            ContentItem::InputFile { .. } => retained.push(item),
             ContentItem::InputImage { .. } => unreachable!("images are handled atomically above"),
         }
     }

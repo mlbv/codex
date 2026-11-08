@@ -65,7 +65,8 @@ pub trait AgentControl: Send + Sync {
 
     /// Resolve, reload if needed and accept input. Agent messages retain their attribution
     /// and wake mode: queue-only messages do not start work and follow-ups cannot target
-    /// the root. Legacy user input can address loaded threads outside the agent registry.
+    /// the root, except that opt-in Claude delegation wakes root recipients. Legacy user
+    /// input can address loaded threads outside the agent registry.
     fn send(&self, request: SendRequest) -> BoxFuture<'_, Result<DeliveryReceipt>>;
 
     /// Take queued, non-turn-starting mail in order, without loading the recipient.

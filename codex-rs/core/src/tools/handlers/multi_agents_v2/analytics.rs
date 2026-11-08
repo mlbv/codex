@@ -41,6 +41,10 @@ impl ToolCallAnalytics {
         self.item.receiver_thread_ids = vec![thread_id];
     }
 
+    pub(super) fn set_receivers(&mut self, thread_ids: Vec<ThreadId>) {
+        self.item.receiver_thread_ids = thread_ids;
+    }
+
     pub(super) fn finish<T, E>(mut self, result: &Result<T, E>) {
         self.item.status = if result.is_ok() {
             CollabAgentToolCallStatus::Completed

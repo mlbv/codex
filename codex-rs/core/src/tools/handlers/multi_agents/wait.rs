@@ -66,7 +66,22 @@ impl Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: WaitArgs = parse_arguments(&arguments)?;
-        let receiver_thread_ids = parse_agent_id_targets(args.targets)?;
+        let receiver_thread_ids = if cfg!(feature = "claude-code")
+            && session.enabled(codex_features::Feature::ClaudeDelegation)
+        {
+            if args.targets.is_empty() {
+                return Err(FunctionCallError::RespondToModel(
+                    "agent ids must be non-empty".to_string(),
+                ));
+            }
+            let mut ids = Vec::with_capacity(args.targets.len());
+            for target in args.targets {
+                ids.push(resolve_agent_id_target(&session, &turn, &target).await?);
+            }
+            ids
+        } else {
+            parse_agent_id_targets(args.targets)?
+        };
         let local_agent_control = session
             .services
             .local_agent_runtime
@@ -136,10 +151,20 @@ impl Handler {
             match subscription {
                 Ok((initial, updates)) => {
                     let status = initial.status().cloned().unwrap_or(AgentStatus::NotFound);
-                    if is_final(&status) {
-                        initial_final_statuses.push((*id, status));
+                    if cfg!(feature = "claude-code")
+                        && session.enabled(codex_features::Feature::ClaudeDelegation)
+                        && matches!(status, AgentStatus::Completed(_))
+                    {
+                        let updates: StatusSubscription = Box::pin(
+                            futures::stream::once(async move { Ok(initial) }).chain(updates),
+                        );
+                        status_rxs.push((*id, updates));
+                    } else {
+                        if is_final(&status) {
+                            initial_final_statuses.push((*id, status));
+                        }
+                        status_rxs.push((*id, updates));
                     }
-                    status_rxs.push((*id, updates));
                 }
                 Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
                     initial_final_statuses.push((*id, AgentStatus::NotFound));
@@ -327,6 +352,9 @@ async fn wait_for_final_status(
     while let Some(snapshot) = updates.next().await {
         let snapshot = snapshot.map_err(|err| collab_agent_error(thread_id, err))?;
         let status = snapshot.status().cloned().unwrap_or(AgentStatus::NotFound);
+        #[cfg(feature = "claude-code")]
+        let status =
+            crate::claude_code::delegation::settled_status(&session, thread_id, status).await?;
         if is_final(&status) {
             return Ok(Some((thread_id, status)));
         }

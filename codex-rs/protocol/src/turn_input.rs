@@ -197,6 +197,8 @@ pub enum TurnInputMode {
     /// Start an internal continuation when idle.
     /// Reject if another task has started since the expected previous turn.
     ContinueIfIdle { expected_previous_turn_id: String },
+    /// Start a host-owned event continuation when idle, including in Plan mode.
+    WakeIfIdle,
     /// Steer only if this exact turn is active.
     Steer { expected_turn_id: String },
 }

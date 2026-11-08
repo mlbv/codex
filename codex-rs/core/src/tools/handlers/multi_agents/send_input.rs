@@ -5,6 +5,8 @@ use crate::agent::control::render_input_preview;
 use crate::tools::handlers::multi_agents_spec::create_send_input_tool_v1;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 pub(crate) struct Handler;
 
@@ -46,36 +48,62 @@ impl Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: SendInputArgs = parse_arguments(&arguments)?;
-        let receiver_thread_id = parse_agent_id_target(&args.target)?;
+        let broadcast = cfg!(feature = "claude-code")
+            && session.enabled(codex_features::Feature::ClaudeDelegation)
+            && args.target == "*";
+        #[cfg(feature = "claude-code")]
+        let receiver_thread_ids = if broadcast {
+            crate::claude_code::delegation::native_message_targets(
+                &session,
+                &turn.session_source,
+                &args.target,
+            )
+            .await
+            .unwrap()
+        } else {
+            vec![resolve_agent_id_target(&session, &turn, &args.target).await?]
+        };
+        #[cfg(not(feature = "claude-code"))]
+        let receiver_thread_ids =
+            vec![resolve_agent_id_target(&session, &turn, &args.target).await?];
         let input_items = parse_collab_input(args.message, args.items)?;
         let prompt = render_input_preview(&input_items);
         let local_agent_control = session
             .services
             .local_agent_runtime
             .control(session.session_id());
-        let receiver_agent = local_agent_control.get_agent_metadata(receiver_thread_id);
-        let residency_pin = if receiver_agent.is_some() {
-            let resume_config = build_agent_resume_config(turn.as_ref())
-                .map_err(FunctionCallError::RespondToModel)?;
-            local_agent_control
-                .ensure_v2_agent_loaded(resume_config, receiver_thread_id, /*parent*/ None)
-                .await
-                .map_err(|err| collab_agent_error(receiver_thread_id, err))?
-        } else {
-            None
-        };
-        let receiver_agent = receiver_agent.unwrap_or_default();
-        if args.interrupt {
-            session
-                .services
-                .agent_control
-                .interrupt(
-                    session.thread_id,
-                    AgentTarget::Id(receiver_thread_id),
-                    MultiAgentVersion::V1,
-                )
-                .await
-                .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
+        let mut receiver_agents = Vec::with_capacity(receiver_thread_ids.len());
+        let mut residency_pins = Vec::with_capacity(receiver_thread_ids.len());
+        for id in &receiver_thread_ids {
+            let receiver_agent = local_agent_control.get_agent_metadata(*id);
+            if receiver_agent.is_some() {
+                let resume_config = build_agent_resume_config(turn.as_ref())
+                    .map_err(FunctionCallError::RespondToModel)?;
+                residency_pins.push(
+                    local_agent_control
+                        .ensure_v2_agent_loaded(resume_config, *id, /*parent*/ None)
+                        .await
+                        .map_err(|err| collab_agent_error(*id, err))?,
+                );
+            }
+            let receiver_agent = receiver_agent.unwrap_or_default();
+            receiver_agents.push(CollabAgentRef {
+                thread_id: *id,
+                agent_nickname: receiver_agent.agent_nickname,
+                agent_role: receiver_agent.agent_role,
+            });
+            if args.interrupt {
+                session
+                    .services
+                    .agent_control
+                    .interrupt(
+                        session.thread_id,
+                        AgentTarget::Id(*id),
+                        MultiAgentVersion::V1,
+                    )
+                    .await
+                    .map_err(|err| collab_agent_error(*id, err))?;
+            }
         }
         session
             .emit_turn_item_started(
@@ -85,7 +113,7 @@ impl Handler {
                     tool: CollabAgentTool::SendInput,
                     status: CollabAgentToolCallStatus::InProgress,
                     sender_thread_id: session.thread_id,
-                    receiver_thread_ids: vec![receiver_thread_id],
+                    receiver_thread_ids: receiver_thread_ids.clone(),
                     receiver_agents: Vec::new(),
                     prompt: Some(prompt.clone()),
                     model: None,
@@ -94,46 +122,77 @@ impl Handler {
                 }),
             )
             .await;
-        let result = local_agent_control
-            .send_input(
-                receiver_thread_id,
-                input_items,
-                crate::TurnStartOptions {
-                    parent_turn_id: Some(turn.sub_id.clone()),
-                    root_turn_id: turn.turn_metadata_state.root_turn_id(),
-                    turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
-                    cyber_access_program: turn.cyber_access_program,
-                    ..Default::default()
-                },
+        let result = async {
+            let mut submissions = BTreeMap::new();
+            for id in &receiver_thread_ids {
+                #[cfg(feature = "claude-code")]
+                crate::claude_code::delegation::native_followup(&session, *id).await?;
+                let submission_id = local_agent_control
+                    .send_input(
+                        *id,
+                        input_items.clone(),
+                        crate::TurnStartOptions {
+                            parent_turn_id: Some(turn.sub_id.clone()),
+                            root_turn_id: turn.turn_metadata_state.root_turn_id(),
+                            turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
+                            cyber_access_program: turn.cyber_access_program,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(|err| collab_agent_error(*id, err))?;
+                submissions.insert(id.to_string(), submission_id);
+            }
+            Ok::<_, FunctionCallError>(submissions)
+        }
+        .await;
+        drop(residency_pins);
+        let mut agents_states = HashMap::new();
+        for id in &receiver_thread_ids {
+            agents_states.insert(*id, local_agent_control.get_status(*id).await);
+        }
+        let status = if !broadcast {
+            collab_tool_call_status(
+                agents_states.values().next().unwrap(),
+                receiver_thread_ids.first().copied(),
             )
-            .await
-            .map_err(|err| collab_agent_error(receiver_thread_id, err));
-        drop(residency_pin);
-        let status = local_agent_control.get_status(receiver_thread_id).await;
+        } else if result.is_err()
+            || agents_states
+                .values()
+                .any(|status| matches!(status, AgentStatus::Errored(_) | AgentStatus::NotFound))
+        {
+            CollabAgentToolCallStatus::Failed
+        } else {
+            CollabAgentToolCallStatus::Completed
+        };
         session
             .emit_turn_item_completed(
                 &turn,
                 TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
                     id: call_id,
                     tool: CollabAgentTool::SendInput,
-                    status: collab_tool_call_status(&status, Some(receiver_thread_id)),
+                    status,
                     sender_thread_id: session.thread_id,
-                    receiver_thread_ids: vec![receiver_thread_id],
-                    receiver_agents: vec![CollabAgentRef {
-                        thread_id: receiver_thread_id,
-                        agent_nickname: receiver_agent.agent_nickname,
-                        agent_role: receiver_agent.agent_role,
-                    }],
+                    receiver_thread_ids,
+                    receiver_agents,
                     prompt: Some(prompt),
                     model: None,
                     reasoning_effort: None,
-                    agents_states: [(receiver_thread_id, status)].into_iter().collect(),
+                    agents_states,
                 }),
             )
             .await;
-        let submission_id = result?;
-
-        Ok(boxed_tool_output(SendInputResult { submission_id }))
+        let submissions = result?;
+        #[cfg(feature = "claude-code")]
+        if broadcast {
+            return Ok(boxed_tool_output(SendInputResult::Broadcast {
+                submissions,
+            }));
+        }
+        let output = SendInputResult::Single {
+            submission_id: submissions.into_values().next().unwrap(),
+        };
+        Ok(boxed_tool_output(output))
     }
 }
 
@@ -153,8 +212,15 @@ struct SendInputArgs {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct SendInputResult {
-    submission_id: String,
+#[serde(untagged)]
+pub(crate) enum SendInputResult {
+    Single {
+        submission_id: String,
+    },
+    #[cfg(feature = "claude-code")]
+    Broadcast {
+        submissions: BTreeMap<String, String>,
+    },
 }
 
 impl ToolOutput for SendInputResult {

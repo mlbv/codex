@@ -270,6 +270,10 @@ fn request_body<'a>(
                 ContentItem::InputAudio { .. } => {
                     return Err(DecisionsError::UnsupportedAudio);
                 }
+                #[cfg(feature = "messages-api")]
+                ContentItem::InputFile { .. } => {
+                    return Err(DecisionsError::UnsupportedInputItem);
+                }
             }
         }
         // Harness annotations/IDs are not part of the Decisions contract.

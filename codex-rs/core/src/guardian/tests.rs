@@ -369,6 +369,8 @@ fn response_item_contains_message_text(item: &ResponseItem, needle: &str) -> boo
             text.contains(needle)
         }
         ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+        #[cfg(feature = "messages-api")]
+        ContentItem::InputFile { .. } => false,
     })
 }
 

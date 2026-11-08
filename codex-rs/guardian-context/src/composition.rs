@@ -128,6 +128,8 @@ impl SectionContent {
                 | ContentItem::InputAudio {
                     audio: AudioReference::File { .. },
                 } => 0,
+                #[cfg(feature = "messages-api")]
+                ContentItem::InputFile { file } => file.payload_len(),
             },
         }
     }
@@ -577,6 +579,12 @@ impl ComposedContext {
                     }
                     ContentItem::InputImage { image, detail } => UserInput::Image { image, detail },
                     ContentItem::InputAudio { .. } | ContentItem::OutputText { .. } => {
+                        return Err(SectionError::UnsupportedDelivery {
+                            section: section.id,
+                        });
+                    }
+                    #[cfg(feature = "messages-api")]
+                    ContentItem::InputFile { .. } => {
                         return Err(SectionError::UnsupportedDelivery {
                             section: section.id,
                         });

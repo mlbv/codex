@@ -1,3 +1,8 @@
+#[cfg(all(feature = "daemon", feature = "messages-api"))]
+compile_error!(
+    "daemon and messages-api are separate binary configurations; enable one product feature"
+);
+
 use clap::Args;
 use clap::CommandFactory;
 use clap::Parser;
@@ -7,7 +12,7 @@ use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
 use codex_app_server_daemon::LifecycleCommand as AppServerLifecycleCommand;
 use codex_app_server_daemon::RemoteControlMode as AppServerRemoteControlMode;
 use codex_arg0::Arg0DispatchPaths;
-use codex_arg0::arg0_dispatch_or_else;
+use codex_arg0::arg0_dispatch_or_else_with_startup;
 use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
 use codex_cli::cloud_config;
@@ -24,6 +29,8 @@ use codex_exec::Cli as ExecCli;
 use codex_exec::Command as ExecCommand;
 use codex_exec::ReviewArgs;
 use codex_execpolicy::ExecPolicyCheckCommand;
+#[cfg(feature = "messages-api")]
+use codex_messages_api::Args as MessagesApiArgs;
 use codex_responses_api_proxy::Args as ResponsesApiProxyArgs;
 use codex_rollout_trace::REDUCED_STATE_FILE_NAME;
 use codex_rollout_trace::replay_bundle;
@@ -232,6 +239,10 @@ enum Subcommand {
     /// Internal: run the responses API proxy.
     #[clap(hide = true)]
     ResponsesApiProxy(ResponsesApiProxyArgs),
+
+    /// [EXPERIMENTAL] Serve the Anthropic Messages API with its own login.
+    #[cfg(feature = "messages-api")]
+    MessagesApi(MessagesApiArgs),
 
     /// Internal: relay stdio to a Unix domain socket.
     #[clap(hide = true, name = "stdio-to-uds")]
@@ -1035,15 +1046,31 @@ fn stage_str(stage: Stage) -> &'static str {
 }
 
 fn main() -> anyhow::Result<()> {
-    codex_build_info::initialize!();
-    let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
-    arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
-        // Finish polling the large subcommand dispatcher before polling interactive TUI events.
-        if let Some(tui) = Box::pin(dispatch_cli(arg0_paths, remote_control_disabled)).await? {
-            tui.await?;
-        }
-        Ok(())
-    })
+    arg0_dispatch_or_else_with_startup(
+        || {
+            codex_build_info::initialize!();
+            Ok(codex_app_server::take_remote_control_disabled_env())
+        },
+        move |arg0_paths: Arg0DispatchPaths, remote_control_disabled| async move {
+            #[cfg(feature = "daemon")]
+            let mut args = std::env::args_os().skip(1);
+            #[cfg(feature = "daemon")]
+            if args.next().as_deref() == Some(std::ffi::OsStr::new("claude-code-bridge")) {
+                let args = args
+                    .map(|arg| {
+                        arg.into_string()
+                            .map_err(|_| anyhow::anyhow!("bridge arguments must be UTF-8"))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                return codex_core::claude_code::run_bridge(args).await;
+            }
+            // Finish polling the large subcommand dispatcher before polling interactive TUI events.
+            if let Some(tui) = Box::pin(dispatch_cli(arg0_paths, remote_control_disabled)).await? {
+                tui.await?;
+            }
+            Ok(())
+        },
+    )
 }
 
 async fn dispatch_cli(
@@ -1870,6 +1897,16 @@ async fn dispatch_cli(
             );
             run_apply_command(apply_cli, /*cwd*/ None).await?;
         }
+        #[cfg(feature = "messages-api")]
+        Some(Subcommand::MessagesApi(mut args)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "messages-api",
+            )?;
+            prepend_config_flags(&mut args.config_overrides, root_config_overrides.clone());
+            codex_messages_api::run_main(args).await?;
+        }
         Some(Subcommand::ResponsesApiProxy(args)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2370,6 +2407,8 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Execpolicy(_)) => Some("execpolicy"),
         Some(Subcommand::Apply(_)) => Some("apply"),
         Some(Subcommand::ResponsesApiProxy(_)) => Some("responses-api-proxy"),
+        #[cfg(feature = "messages-api")]
+        Some(Subcommand::MessagesApi(_)) => Some("messages-api"),
         Some(Subcommand::StdioToUds(_)) => Some("stdio-to-uds"),
         Some(Subcommand::Features(_)) => Some("features"),
         Some(Subcommand::TcpTunnel(_)) => Some("tcp-tunnel"),

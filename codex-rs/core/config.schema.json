@@ -912,6 +912,18 @@
             "chronicle": {
               "type": "boolean"
             },
+            "claude_background_tasks": {
+              "type": "boolean"
+            },
+            "claude_delegation": {
+              "type": "boolean"
+            },
+            "claude_memory": {
+              "type": "boolean"
+            },
+            "claude_messaging": {
+              "type": "boolean"
+            },
             "cli_daybreak": {
               "type": "boolean"
             },
@@ -7504,6 +7516,13 @@
       "description": "Legacy fallback for `tui.disable_paste_burst`. Prefer the setting under `[tui]`.",
       "type": "boolean"
     },
+    "env": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Process environment overrides from the user config, applied before runtime startup. Values take precedence over inherited variables and `.env`; project/profile tables are not applied.",
+      "type": "object"
+    },
     "experimental_compact_prompt_file": {
       "$ref": "#/definitions/AbsolutePathBuf"
     },
@@ -7621,6 +7640,18 @@
           "type": "boolean"
         },
         "chronicle": {
+          "type": "boolean"
+        },
+        "claude_background_tasks": {
+          "type": "boolean"
+        },
+        "claude_delegation": {
+          "type": "boolean"
+        },
+        "claude_memory": {
+          "type": "boolean"
+        },
+        "claude_messaging": {
           "type": "boolean"
         },
         "cli_daybreak": {
