@@ -635,6 +635,8 @@ pub(crate) fn legacy_notify_input_messages(input: &[ResponseItem]) -> Vec<String
                         ContentItem::InputImage { .. }
                         | ContentItem::InputAudio { .. }
                         | ContentItem::OutputText { .. } => None,
+                        #[cfg(feature = "messages-api")]
+                        ContentItem::InputFile { .. } => None,
                     })
                     .collect(),
             )
@@ -1206,6 +1208,10 @@ mod tests {
                                 ContentItem::InputImage { .. }
                                 | ContentItem::InputAudio { .. }
                                 | ContentItem::OutputText { .. } => {
+                                    panic!("expected input text content, got {item:?}")
+                                }
+                                #[cfg(feature = "messages-api")]
+                                ContentItem::InputFile { .. } => {
                                     panic!("expected input text content, got {item:?}")
                                 }
                             })

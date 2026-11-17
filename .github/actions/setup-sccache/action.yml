@@ -1,0 +1,39 @@
+name: setup-sccache
+description: Install sccache through the release-asset API, then configure it with mozilla-actions/sccache-action.
+inputs:
+  version:
+    description: sccache release tag.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # sccache-action takes a binary already in the tool cache; github.com release URLs are
+    # not needed when the authenticated API serves the assets.
+    - name: Seed the tool cache with sccache
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Windows-X64) platform=x86_64-pc-windows-msvc ;;
+          Linux-X64) platform=x86_64-unknown-linux-musl ;;
+          *) echo "No sccache asset mapping for ${RUNNER_OS}-${RUNNER_ARCH}" >&2; exit 1 ;;
+        esac
+        name="sccache-${VERSION}-${platform}"
+        download="${RUNNER_TEMP}/sccache-download"
+        mkdir -p "${download}"
+        gh release download "${VERSION}" --repo mozilla/sccache --dir "${download}" --clobber \
+          --pattern "${name}.tar.gz" --pattern "${name}.tar.gz.sha256"
+        cd "${download}"
+        echo "$(tr -d '[:space:]' < "${name}.tar.gz.sha256")  ${name}.tar.gz" | sha256sum --check -
+        tar -xzf "${name}.tar.gz"
+        home="${RUNNER_TOOL_CACHE}/sccache/${VERSION#v}/${RUNNER_ARCH,,}"
+        mkdir -p "${home}"
+        cp -R "${name}/." "${home}/"
+        touch "${home}.complete"
+    - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      with:
+        version: ${{ inputs.version }}

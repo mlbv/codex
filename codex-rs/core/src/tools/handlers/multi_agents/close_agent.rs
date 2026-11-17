@@ -40,7 +40,7 @@ async fn handle_close_agent(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: CloseAgentArgs = parse_arguments(&arguments)?;
-    let agent_id = parse_agent_id_target(&args.target)?;
+    let agent_id = resolve_agent_id_target(&session, &turn, &args.target).await?;
     let local_agent_control = session
         .services
         .local_agent_runtime
@@ -96,6 +96,8 @@ async fn handle_close_agent(
         )
         .await;
     result.map_err(|err| collab_agent_error(agent_id, err))?;
+    #[cfg(feature = "claude-code")]
+    crate::claude_code::delegation::native_closed(&session, agent_id).await?;
 
     Ok(CloseAgentResult {
         previous_status: status,

@@ -12,6 +12,13 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+messages-api = [
+    "codex-otel/messages-api",
+    "codex-protocol/messages-api",
+    "codex-utils-output-truncation/messages-api",
+]
+
 [dependencies]
 codex-utils-process = { workspace = true }
 anyhow = { workspace = true }

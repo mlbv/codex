@@ -144,6 +144,8 @@ impl TranscriptImages {
                             ContentItem::InputText { .. }
                             | ContentItem::InputAudio { .. }
                             | ContentItem::OutputText { .. } => {}
+                            #[cfg(feature = "messages-api")]
+                            ContentItem::InputFile { .. } => {}
                         }
                     }
                 }
@@ -160,6 +162,8 @@ impl TranscriptImages {
                                 FunctionCallOutputContentItem::InputText { .. }
                                 | FunctionCallOutputContentItem::InputAudio { .. }
                                 | FunctionCallOutputContentItem::EncryptedContent { .. } => {}
+                                #[cfg(feature = "messages-api")]
+                                FunctionCallOutputContentItem::InputFile { .. } => {}
                             }
                         }
                     }
@@ -181,6 +185,8 @@ impl TranscriptImages {
                     | ContentItem::InputText { .. }
                     | ContentItem::InputAudio { .. }
                     | ContentItem::OutputText { .. } => {}
+                    #[cfg(feature = "messages-api")]
+                    ContentItem::InputFile { .. } => {}
                 }
             }
         }

@@ -2,6 +2,7 @@ mod history;
 mod image_availability;
 mod normalize;
 mod sampling;
+mod token_estimator;
 pub(crate) mod updates;
 
 pub(crate) use history::ContextManager;
@@ -13,3 +14,7 @@ pub(crate) use history::is_user_turn_boundary;
 pub(crate) use history::rejected_audio;
 pub(crate) use image_availability::replace_unresolvable_image_files;
 pub(crate) use sampling::sampled_through;
+#[cfg(feature = "messages-api")]
+pub(crate) use token_estimator::estimate_item_tokens;
+#[cfg(feature = "messages-api")]
+pub(crate) use token_estimator::estimate_text_tokens;

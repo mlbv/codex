@@ -4,6 +4,48 @@ use codex_tools::JsonSchemaType;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
+#[cfg(feature = "claude-code")]
+#[test_case::test_case(false, false; "v1_disabled")]
+#[test_case::test_case(false, true; "v1_enabled")]
+#[test_case::test_case(true, false; "v2_disabled")]
+#[test_case::test_case(true, true; "v2_enabled")]
+fn spawn_agent_claude_options_are_opt_in(v2: bool, enabled: bool) {
+    let options = SpawnAgentToolOptions {
+        claude_delegation: enabled,
+        ..Default::default()
+    };
+    let tool = if v2 {
+        create_spawn_agent_tool_v2(options, Some("Configured spawn guidance."))
+    } else {
+        create_spawn_agent_tool_v1(options)
+    };
+    let function = match tool {
+        ToolSpec::Function(tool) => tool,
+        ToolSpec::Namespace(mut namespace) => match namespace.tools.remove(0) {
+            ResponsesApiNamespaceTool::Function(tool) => tool,
+            _ => panic!("expected spawn_agent function"),
+        },
+        _ => panic!("expected spawn_agent function"),
+    };
+    let properties = function.parameters.properties.unwrap();
+    assert_eq!(properties.contains_key("name"), enabled);
+    assert_eq!(properties.contains_key("run_in_background"), enabled);
+    assert_eq!(
+        function.description.contains("run_in_background=false"),
+        enabled
+    );
+    let output = function.output_schema.unwrap().to_value();
+    assert_eq!(output["properties"].get("status").is_some(), enabled);
+    assert_eq!(output["properties"].get("result").is_some(), enabled);
+    if v2 {
+        assert!(function.description.contains("Configured spawn guidance."));
+        assert_eq!(
+            function.parameters.required,
+            Some(vec!["task_name".to_string(), "message".to_string()].into())
+        );
+    }
+}
+
 #[test]
 fn spawn_agent_tool_v2_requires_task_name() {
     let tool = create_spawn_agent_tool_v2(

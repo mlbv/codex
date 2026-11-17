@@ -923,6 +923,11 @@ pub enum ContentItem {
         #[serde(flatten)]
         audio: AudioReference,
     },
+    #[cfg(feature = "messages-api")]
+    InputFile {
+        #[serde(flatten)]
+        file: FileReference,
+    },
     OutputText {
         text: String,
         // Preserve provider metadata, including empty arrays, for sampled-output replay.
@@ -950,6 +955,8 @@ impl ContentItem {
         match self {
             Self::InputText { text } | Self::OutputText { text, .. } => Some(text),
             Self::InputImage { .. } | Self::InputAudio { .. } => None,
+            #[cfg(feature = "messages-api")]
+            Self::InputFile { .. } => None,
         }
     }
 }
@@ -969,6 +976,27 @@ pub enum ImageReference {
 pub enum AudioReference {
     Inline { audio_url: String },
     File { file_id: String },
+}
+
+/// An `input_file` document. Inline data must carry a filename.
+#[cfg(feature = "messages-api")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
+#[serde(untagged)]
+#[ts(untagged)]
+pub enum FileReference {
+    Inline { filename: String, file_data: String },
+    Url { file_url: String },
+}
+
+#[cfg(feature = "messages-api")]
+impl FileReference {
+    /// Bytes the reference carries: the data URL, or the URL.
+    pub fn payload_len(&self) -> usize {
+        match self {
+            Self::Inline { file_data, .. } => file_data.len(),
+            Self::Url { file_url } => file_url.len(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
@@ -1968,6 +1996,8 @@ pub fn is_opening_media_label(text: &str, media: &ContentItem) -> bool {
             is_local_audio_open_tag_text(text) || is_audio_open_tag_text(text)
         }
         ContentItem::InputText { .. } | ContentItem::OutputText { .. } => false,
+        #[cfg(feature = "messages-api")]
+        ContentItem::InputFile { .. } => false,
     }
 }
 
@@ -1977,6 +2007,8 @@ pub fn is_closing_media_label(text: &str, media: &ContentItem) -> bool {
         ContentItem::InputImage { .. } => is_image_close_tag_text(text),
         ContentItem::InputAudio { .. } => is_audio_close_tag_text(text),
         ContentItem::InputText { .. } | ContentItem::OutputText { .. } => false,
+        #[cfg(feature = "messages-api")]
+        ContentItem::InputFile { .. } => false,
     }
 }
 
@@ -2357,6 +2389,12 @@ pub enum FunctionCallOutputContentItem {
         #[serde(flatten)]
         audio: AudioReference,
     },
+    // Do not rename, these are serialized and used directly in the responses API.
+    #[cfg(feature = "messages-api")]
+    InputFile {
+        #[serde(flatten)]
+        file: FileReference,
+    },
     EncryptedContent {
         encrypted_content: String,
     },
@@ -2381,6 +2419,8 @@ impl From<ContentItem> for FunctionCallOutputContentItem {
             }
             ContentItem::InputImage { image, detail } => Self::InputImage { image, detail },
             ContentItem::InputAudio { audio } => Self::InputAudio { audio },
+            #[cfg(feature = "messages-api")]
+            ContentItem::InputFile { file } => Self::InputFile { file },
         }
     }
 }
@@ -2390,7 +2430,7 @@ impl From<ContentItem> for FunctionCallOutputContentItem {
 ///
 /// This conversion is intentionally lossy:
 /// - only `input_text` items are included
-/// - image and audio items are ignored
+/// - image, audio and file items are ignored
 ///
 /// We use this helper where callers still need a string representation (for
 /// example telemetry previews or legacy string-only output paths) while keeping
@@ -2409,6 +2449,8 @@ pub fn function_call_output_content_items_to_text(
             | FunctionCallOutputContentItem::InputImage { .. }
             | FunctionCallOutputContentItem::InputAudio { .. }
             | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
+            #[cfg(feature = "messages-api")]
+            FunctionCallOutputContentItem::InputFile { .. } => None,
         })
         .collect::<Vec<_>>();
 
@@ -2840,6 +2882,40 @@ mod tests {
             turn_id: Some(turn_id.to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    #[cfg(not(feature = "messages-api"))]
+    fn native_content_rejects_input_file() {
+        let document = serde_json::json!({
+            "type": "input_file",
+            "file_url": "https://example.com/document.pdf",
+        });
+        assert!(serde_json::from_value::<ContentItem>(document.clone()).is_err());
+        assert!(serde_json::from_value::<FunctionCallOutputContentItem>(document).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "messages-api")]
+    fn messages_api_documents_roundtrip_in_messages_and_tool_outputs() -> Result<()> {
+        for document in [
+            serde_json::json!({
+                "type": "input_file",
+                "file_url": "https://example.com/document.pdf",
+            }),
+            serde_json::json!({
+                "type": "input_file",
+                "filename": "document.pdf",
+                "file_data": "data:application/pdf;base64,JVBERi0=",
+            }),
+        ] {
+            let content: ContentItem = serde_json::from_value(document.clone())?;
+            assert_eq!(serde_json::to_value(&content)?, document);
+            let output: FunctionCallOutputContentItem = serde_json::from_value(document.clone())?;
+            assert_eq!(serde_json::to_value(&output)?, document);
+            assert_eq!(FunctionCallOutputContentItem::from(content), output);
+        }
+        Ok(())
     }
 
     #[test]

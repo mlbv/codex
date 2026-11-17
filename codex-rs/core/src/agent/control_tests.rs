@@ -375,6 +375,8 @@ fn has_subagent_notification<'a>(
                 SubagentNotification::matches_text(text)
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+            #[cfg(feature = "messages-api")]
+            ContentItem::InputFile { .. } => false,
         })
     })
 }
@@ -393,6 +395,8 @@ fn history_contains_text<'a>(
                 text.contains(needle)
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+            #[cfg(feature = "messages-api")]
+            ContentItem::InputFile { .. } => false,
         })
     })
 }
@@ -441,6 +445,8 @@ fn history_contains_assistant_inter_agent_communication<'a>(
             ContentItem::InputText { .. }
             | ContentItem::InputImage { .. }
             | ContentItem::InputAudio { .. } => false,
+            #[cfg(feature = "messages-api")]
+            ContentItem::InputFile { .. } => false,
         })
     })
 }

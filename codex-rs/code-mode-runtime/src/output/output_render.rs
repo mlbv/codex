@@ -184,6 +184,10 @@ fn into_code_mode_output(item: FunctionCallOutputContentItem) -> OutputItem {
         FunctionCallOutputContentItem::InputAudio {
             audio: AudioReference::Inline { audio_url },
         } => OutputItem::InputAudio { audio_url },
+        #[cfg(feature = "messages-api")]
+        FunctionCallOutputContentItem::InputFile { .. } => {
+            unreachable!("output truncation must not introduce new content types")
+        }
         FunctionCallOutputContentItem::EncryptedContent { .. }
         | FunctionCallOutputContentItem::InputAudio {
             audio: AudioReference::File { .. },

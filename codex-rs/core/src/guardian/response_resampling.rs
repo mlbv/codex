@@ -73,6 +73,7 @@ impl ResponseResampling {
             ResponseEvent::OutputItemAdded(_)
             | ResponseEvent::OutputTextDelta(_)
             | ResponseEvent::ToolCallInputDelta { .. }
+            | ResponseEvent::FunctionCallArgumentsDelta { .. }
             | ResponseEvent::ReasoningSummaryDelta { .. }
             | ResponseEvent::ReasoningSummaryDone { .. }
             | ResponseEvent::ReasoningContentDelta { .. }
@@ -97,7 +98,8 @@ impl ResponseResampling {
                 self.update_usage_boundary =
                     token_usage.is_some() && !self.accepted_output.is_empty();
             }
-            ResponseEvent::Created { .. }
+            ResponseEvent::Incomplete { .. }
+            | ResponseEvent::Created { .. }
             | ResponseEvent::SafetyBuffering(_)
             | ResponseEvent::ServerModel(_)
             | ResponseEvent::ModelVerifications(_)

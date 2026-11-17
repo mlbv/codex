@@ -58,6 +58,8 @@ async fn handle_spawn_agent(
         step_context,
         payload,
         call_id,
+        #[cfg(feature = "claude-code")]
+        cancellation_token,
         ..
     } = invocation;
     let turn = &step_context.turn;
@@ -68,8 +70,37 @@ async fn handle_spawn_agent(
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
+    #[cfg(feature = "claude-code")]
+    let delegation = crate::claude_code::delegation::prepare_native_spawn(
+        &session,
+        &turn.session_source,
+        args.name,
+        args.run_in_background,
+    )
+    .await?;
     let input_items = parse_collab_input(args.message, args.items)?;
+    #[cfg(feature = "claude-code")]
+    let mut input_items = input_items;
+    #[cfg(feature = "claude-code")]
+    if let Some(delegation) = &delegation {
+        let prompt = delegation.decorate_prompt(String::new());
+        if !prompt.is_empty() {
+            input_items.insert(
+                0,
+                UserInput::Text {
+                    text: prompt,
+                    text_elements: Vec::new(),
+                },
+            );
+        }
+    }
     let prompt = render_input_preview(&input_items);
+    #[cfg(not(feature = "claude-code"))]
+    let task_name = None;
+    #[cfg(feature = "claude-code")]
+    let task_name = delegation
+        .as_ref()
+        .map(|_| format!("agent_{}", uuid::Uuid::new_v4().simple()));
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
     let max_depth = turn.config.agent_max_depth;
@@ -122,7 +153,7 @@ async fn handle_spawn_agent(
                 &turn.session_source,
                 child_depth,
                 prepared.role_name.as_deref(),
-                /*task_name*/ None,
+                task_name,
             )?,
             options: SpawnAgentOptions {
                 fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
@@ -195,7 +226,7 @@ async fn handle_spawn_agent(
             }),
         )
         .await;
-    let (spawned_agent, _) = result?;
+    let (spawned_agent, _snapshot) = result?;
     let new_thread_id = spawned_agent.thread_id;
     let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(
@@ -204,9 +235,30 @@ async fn handle_spawn_agent(
         &[("role", role_tag), ("version", "v1")],
     );
 
+    #[cfg(feature = "claude-code")]
+    let delegation = match delegation {
+        Some(delegation) => Some(
+            delegation
+                .finish(
+                    session,
+                    cancellation_token,
+                    new_thread_id,
+                    _snapshot
+                        .session_source
+                        .get_agent_path()
+                        .unwrap()
+                        .to_string(),
+                    MultiAgentVersion::V1,
+                )
+                .await?,
+        ),
+        None => None,
+    };
     Ok(SpawnAgentResult {
         agent_id: new_thread_id.to_string(),
         nickname,
+        #[cfg(feature = "claude-code")]
+        delegation,
     })
 }
 
@@ -225,12 +277,19 @@ struct SpawnAgentArgs {
     reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     fork_context: bool,
+    #[cfg(feature = "claude-code")]
+    name: Option<String>,
+    #[cfg(feature = "claude-code")]
+    run_in_background: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct SpawnAgentResult {
     agent_id: String,
     nickname: Option<String>,
+    #[cfg(feature = "claude-code")]
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    delegation: Option<crate::claude_code::delegation::NativeSpawnResult>,
 }
 
 impl ToolOutput for SpawnAgentResult {

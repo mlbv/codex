@@ -36,6 +36,8 @@ pub(super) fn content_item_token_count(
         ContentItem::InputAudio {
             audio: AudioReference::Inline { .. },
         } => 0,
+        #[cfg(feature = "messages-api")]
+        ContentItem::InputFile { .. } => 0,
     }
 }
 
@@ -44,6 +46,8 @@ fn trailing_media_start(content: &[AnnotatedContent]) -> Option<usize> {
     let last = content.len().checked_sub(1)?;
     let media = match content[last].content() {
         ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => last,
+        #[cfg(feature = "messages-api")]
+        ContentItem::InputFile { .. } => last,
         ContentItem::InputText { text }
             if last > 0 && is_closing_media_label(text, content[last - 1].content()) =>
         {

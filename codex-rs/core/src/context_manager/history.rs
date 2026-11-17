@@ -26,6 +26,8 @@ use crate::context::world_state::WorldStateSnapshot;
 use crate::context::world_state::WorldStateUpdate;
 use crate::context_manager::normalize;
 use crate::context_manager::replace_unresolvable_image_files;
+use crate::context_manager::token_estimator::estimate_item_tokens_with_audio;
+use crate::context_manager::token_estimator::estimate_text_tokens;
 use crate::event_mapping::contextual_dev_fragments;
 use crate::event_mapping::is_contextual_user_message_content;
 use crate::event_mapping::parse_turn_item;
@@ -66,6 +68,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TokenUsageAccounting;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
@@ -75,7 +78,6 @@ use codex_utils_cache::BlockingLruCache;
 use codex_utils_cache::sha1_digest;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_bytes_for_tokens;
-use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_payload;
 use codex_utils_output_truncation::with_serialization_allowance;
@@ -138,6 +140,9 @@ pub(crate) struct ContextManager {
     last_server_reported_usage_item_count: usize,
     /// Index immediately after the latest model output, including failed responses.
     last_model_output_item_count: Option<usize>,
+    /// Past reasoning omitted from the input usage of the last completed response.
+    /// Keep this estimate tied to that response, even when another user turn starts.
+    non_last_reasoning_tokens: i64,
     /// Reference context snapshot used for diffing and producing model-visible
     /// settings update items.
     ///
@@ -339,6 +344,7 @@ impl ContextManager {
             token_info: None,
             last_server_reported_usage_item_count: 0,
             last_model_output_item_count: None,
+            non_last_reasoning_tokens: 0,
             reference_context_item: None,
             world_state_baseline: None,
         }
@@ -540,6 +546,11 @@ impl ContextManager {
     }
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
+        if self.token_info.as_ref().map(|info| &info.last_token_usage)
+            != info.as_ref().map(|info| &info.last_token_usage)
+        {
+            self.non_last_reasoning_tokens = 0;
+        }
         self.token_info = info;
     }
 
@@ -551,6 +562,63 @@ impl ContextManager {
     ) {
         self.last_server_reported_usage_item_count = covered_item_count;
         self.token_info = info;
+        self.non_last_reasoning_tokens = if self
+            .token_info
+            .as_ref()
+            .is_some_and(|info| info.last_usage_includes_reasoning == Some(false))
+        {
+            self.get_non_last_reasoning_items_tokens()
+        } else {
+            0
+        };
+    }
+
+    pub(crate) fn token_usage_accounting(&self) -> TokenUsageAccounting {
+        TokenUsageAccounting {
+            non_last_reasoning_tokens: self.non_last_reasoning_tokens,
+            server_reported_usage_item_count: Some(self.last_server_reported_usage_item_count),
+        }
+    }
+
+    pub(crate) fn restore_token_info(
+        &mut self,
+        info: Option<TokenUsageInfo>,
+        accounting: Option<TokenUsageAccounting>,
+    ) {
+        self.token_info = info;
+        if let Some(accounting) = accounting
+            && let Some(covered_item_count) = accounting.server_reported_usage_item_count
+        {
+            self.non_last_reasoning_tokens = accounting.non_last_reasoning_tokens;
+            self.last_server_reported_usage_item_count = covered_item_count.min(self.items.len());
+        } else {
+            // Keep reported usage, discarding unproven reasoning and tail supplements.
+            self.non_last_reasoning_tokens = 0;
+            self.last_server_reported_usage_item_count = self.items.len();
+        }
+    }
+
+    pub(crate) fn set_token_estimate(
+        &mut self,
+        tokens: i64,
+        model_context_window: Option<i64>,
+        covered_item_count: usize,
+    ) {
+        let mut info = self.token_info.clone().unwrap_or(TokenUsageInfo {
+            total_token_usage: TokenUsage::default(),
+            last_token_usage: TokenUsage::default(),
+            last_usage_includes_reasoning: None,
+            model_context_window: None,
+        });
+        info.last_token_usage = TokenUsage {
+            total_tokens: tokens.max(0),
+            ..Default::default()
+        };
+        if let Some(model_context_window) = model_context_window {
+            info.model_context_window = Some(model_context_window);
+        }
+        info.last_usage_includes_reasoning = Some(true);
+        self.set_token_info_with_boundary(Some(info), covered_item_count);
     }
 
     pub(crate) fn set_reference_context_item(&mut self, item: Option<TurnContextItem>) {
@@ -597,6 +665,8 @@ impl ContextManager {
     }
 
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
+        self.non_last_reasoning_tokens = 0;
+        self.last_server_reported_usage_item_count = self.items.len();
         match &mut self.token_info {
             Some(info) => info.fill_to_context_window(context_window),
             None => {
@@ -820,8 +890,6 @@ impl ContextManager {
         self.sampling.checkpoint(items);
     }
 
-    // Estimate token usage using byte-based heuristics from the truncation helpers.
-    // This is a coarse lower bound, not a tokenizer-accurate count.
     pub(crate) fn estimate_token_count(&self, turn_context: &TurnContext) -> Option<i64> {
         let model_info = &turn_context.model_info();
         let base_instructions = BaseInstructions {
@@ -843,14 +911,14 @@ impl ContextManager {
         let base_tokens = if has_recorded_instructions {
             0
         } else {
-            i64::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i64::MAX)
+            estimate_text_tokens(&base_instructions.text)
         };
 
         let items_tokens = self
             .items
             .iter()
             .map(|envelope| {
-                estimate_item_token_count_with_audio(&envelope.item, &self.file_audio_durations)
+                estimate_item_tokens_with_audio(&envelope.item, &self.file_audio_durations)
             })
             .fold(0i64, i64::saturating_add);
 
@@ -868,6 +936,7 @@ impl ContextManager {
             // running a full normalization pass.
             normalize::remove_corresponding_for(items, &removed.item);
             self.reset_last_usage_boundary();
+            self.non_last_reasoning_tokens = 0;
             self.world_state_baseline = None;
         }
     }
@@ -893,6 +962,7 @@ impl ContextManager {
         }
         self.items = Arc::new(items);
         self.reset_last_usage_boundary();
+        self.non_last_reasoning_tokens = 0;
         self.history_version = self.history_version.saturating_add(1);
         self.reset_version = self.history_version;
         self.world_state_baseline = None;
@@ -935,6 +1005,7 @@ impl ContextManager {
         }
         self.items = Arc::new(items);
         self.reset_last_usage_boundary();
+        self.non_last_reasoning_tokens = 0;
         self.history_version = self.history_version.saturating_add(1);
         if promoted {
             self.reset_version = self.history_version;
@@ -1109,9 +1180,14 @@ impl ContextManager {
     }
 
     fn get_non_last_reasoning_items_tokens(&self) -> i64 {
-        // Get reasoning items excluding all the ones after the last instruction boundary.
-        let Some(last_user_index) = self
+        // A trailing user message has not been sampled yet. Find the instruction
+        // boundary of the latest model response, including when restoring usage.
+        let response_end = self
             .items
+            .iter()
+            .rposition(|envelope| is_model_generated_item(&envelope.item))
+            .map_or(self.items.len(), |index| index.saturating_add(1));
+        let Some(last_user_index) = self.items[..response_end]
             .iter()
             .rposition(|envelope| is_user_turn_boundary(&envelope.item))
         else {
@@ -1132,7 +1208,7 @@ impl ContextManager {
                 )
             })
             .map(|envelope| {
-                estimate_item_token_count_with_audio(&envelope.item, &self.file_audio_durations)
+                estimate_item_tokens_with_audio(&envelope.item, &self.file_audio_durations)
             })
             .fold(0i64, i64::saturating_add)
     }
@@ -1146,29 +1222,21 @@ impl ContextManager {
             .map(|envelope| &envelope.item)
     }
 
+    /// Reasoning coverage belongs to the usage baseline, not the next request's flags.
     pub(crate) fn get_total_token_usage(&self) -> i64 {
         let last_tokens = self
             .token_info
             .as_ref()
             .map(|info| info.last_token_usage.total_tokens)
             .unwrap_or(0);
-        let unreported_tokens = self.estimated_tokens_since_last_usage();
-        if self
-            .token_info
-            .as_ref()
-            .is_some_and(|info| info.last_usage_includes_reasoning == Some(true))
-        {
-            last_tokens.saturating_add(unreported_tokens)
-        } else {
-            last_tokens
-                .saturating_add(self.get_non_last_reasoning_items_tokens())
-                .saturating_add(unreported_tokens)
-        }
+        last_tokens
+            .saturating_add(self.non_last_reasoning_tokens)
+            .saturating_add(self.estimated_tokens_since_last_usage())
     }
 
     pub(crate) fn estimated_tokens_since_last_usage(&self) -> i64 {
         self.items_since_last_usage()
-            .map(|item| estimate_item_token_count_with_audio(item, &self.file_audio_durations))
+            .map(|item| estimate_item_tokens_with_audio(item, &self.file_audio_durations))
             .fold(0i64, i64::saturating_add)
     }
 
@@ -1314,6 +1382,20 @@ pub(crate) fn estimate_item_token_count_with_audio(
     ))
 }
 
+/// Overrides plaintext's byte-equivalent cost while retaining native modality estimates.
+pub(crate) fn estimate_item_token_count_with_text(
+    item: &ResponseItem,
+    audio_durations: &FileAudioDurations,
+    text_bytes: fn(&str) -> i64,
+) -> i64 {
+    let model_visible_bytes = estimate_response_item_model_visible_bytes_with_text(
+        item,
+        audio_durations,
+        Some(text_bytes),
+    );
+    approx_tokens_from_byte_count_i64(model_visible_bytes)
+}
+
 /// Approximate model-visible byte cost for one image input.
 ///
 /// The estimator later converts bytes to tokens using a 4-bytes/token heuristic
@@ -1341,6 +1423,15 @@ fn estimate_response_item_model_visible_bytes(
     item: &ResponseItem,
     audio_durations: &FileAudioDurations,
 ) -> i64 {
+    estimate_response_item_model_visible_bytes_with_text(item, audio_durations, None)
+}
+
+fn estimate_response_item_model_visible_bytes_with_text(
+    item: &ResponseItem,
+    audio_durations: &FileAudioDurations,
+    text_estimate: Option<fn(&str) -> i64>,
+) -> i64 {
+    let text_bytes = text_estimate.unwrap_or(text_bytes);
     match item {
         ResponseItem::Message { content, .. } => content
             .iter()
@@ -1353,6 +1444,10 @@ fn estimate_response_item_model_visible_bytes(
                 }
                 ContentItem::InputAudio { audio } => {
                     estimate_audio_reference_bytes(audio, audio_durations)
+                }
+                #[cfg(feature = "messages-api")]
+                ContentItem::InputFile { file } => {
+                    i64::try_from(file.payload_len()).unwrap_or(i64::MAX)
                 }
             })
             .fold(0i64, i64::saturating_add),
@@ -1411,7 +1506,7 @@ fn estimate_response_item_model_visible_bytes(
             namespace,
             output,
             ..
-        } => estimate_function_output_bytes(&output.body, audio_durations)
+        } => estimate_function_output_bytes(&output.body, audio_durations, text_bytes)
             .saturating_add(text_bytes(call_id.as_deref().unwrap_or_default()))
             .saturating_add(text_bytes(name.as_deref().unwrap_or_default()))
             .saturating_add(text_bytes(namespace.as_deref().unwrap_or_default())),
@@ -1420,18 +1515,21 @@ fn estimate_response_item_model_visible_bytes(
             name,
             output,
             ..
-        } => estimate_function_output_bytes(&output.body, audio_durations)
+        } => estimate_function_output_bytes(&output.body, audio_durations, text_bytes)
             .saturating_add(text_bytes(call_id))
             .saturating_add(text_bytes(name.as_deref().unwrap_or_default())),
         // These payloads are themselves JSON arguments, rather than transport envelopes
         // around text. Keep their JSON syntax in the estimate.
-        ResponseItem::AdditionalTools { tools, .. } => json_content_bytes(tools),
-        ResponseItem::ToolSearchCall { arguments, .. } => json_content_bytes(arguments),
-        ResponseItem::ToolSearchOutput { tools, .. } => json_content_bytes(tools),
-        ResponseItem::LocalShellCall { action, .. } => json_content_bytes(action),
-        ResponseItem::WebSearchCall { action, .. } => {
-            action.as_ref().map(json_content_bytes).unwrap_or_default()
+        ResponseItem::AdditionalTools { tools, .. } => json_content_bytes(tools, text_estimate),
+        ResponseItem::ToolSearchCall { arguments, .. } => {
+            json_content_bytes(arguments, text_estimate)
         }
+        ResponseItem::ToolSearchOutput { tools, .. } => json_content_bytes(tools, text_estimate),
+        ResponseItem::LocalShellCall { action, .. } => json_content_bytes(action, text_estimate),
+        ResponseItem::WebSearchCall { action, .. } => action
+            .as_ref()
+            .map(|action| json_content_bytes(action, text_estimate))
+            .unwrap_or_default(),
         ResponseItem::ImageGenerationCall {
             revised_prompt,
             result,
@@ -1462,7 +1560,15 @@ fn text_bytes(text: &str) -> i64 {
     i64::try_from(text.len()).unwrap_or(i64::MAX)
 }
 
-fn json_content_bytes(value: &(impl serde::Serialize + ?Sized)) -> i64 {
+fn json_content_bytes(
+    value: &(impl serde::Serialize + ?Sized),
+    text_estimate: Option<fn(&str) -> i64>,
+) -> i64 {
+    if let Some(estimate) = text_estimate {
+        return serde_json::to_string(value)
+            .map(|text| estimate(&text))
+            .unwrap_or_default();
+    }
     serialized_json_bytes(value)
         .map(|len| i64::try_from(len).unwrap_or(i64::MAX))
         .unwrap_or_default()
@@ -1576,6 +1682,7 @@ fn estimate_audio_reference_bytes(
 fn estimate_function_output_bytes(
     output: &FunctionCallOutputBody,
     audio_durations: &FileAudioDurations,
+    text_bytes: fn(&str) -> i64,
 ) -> i64 {
     match output {
         FunctionCallOutputBody::Text(text) => text_bytes(text),
@@ -1588,6 +1695,10 @@ fn estimate_function_output_bytes(
                 }
                 FunctionCallOutputContentItem::InputAudio { audio } => {
                     estimate_audio_reference_bytes(audio, audio_durations)
+                }
+                #[cfg(feature = "messages-api")]
+                FunctionCallOutputContentItem::InputFile { file } => {
+                    i64::try_from(file.payload_len()).unwrap_or(i64::MAX)
                 }
                 FunctionCallOutputContentItem::EncryptedContent { encrypted_content } => {
                     i64::try_from(estimate_encrypted_function_output_length(

@@ -119,19 +119,26 @@ impl AgentControl for LocalAgentControl {
                     let submission_id = self.send_input(target, input, start_options).await?;
                     (receiver.unwrap_or_default(), submission_id)
                 }
-                AgentInput::Message { message, mode } => {
+                AgentInput::Message { message, mut mode } => {
                     let receiver = self.runtime.ensure_agent_known(target)?;
                     let author = self
                         .runtime
                         .ensure_agent_known(caller)?
                         .agent_path
                         .unwrap_or_else(AgentPath::root);
-                    if mode == MessageDeliveryMode::TriggerTurn
-                        && receiver.agent_path.as_ref().is_some_and(AgentPath::is_root)
-                    {
-                        return Err(CodexErr::UnsupportedOperation(
-                            "Follow-up tasks can't target the root agent".to_string(),
-                        ));
+                    if receiver.agent_path.as_ref().is_some_and(AgentPath::is_root) {
+                        if cfg!(feature = "claude-code")
+                            && resume_config
+                                .features
+                                .enabled(codex_features::Feature::ClaudeDelegation)
+                        {
+                            mode = MessageDeliveryMode::TriggerTurn;
+                            start_options.parent_turn_id = None;
+                        } else if mode == MessageDeliveryMode::TriggerTurn {
+                            return Err(CodexErr::UnsupportedOperation(
+                                "Follow-up tasks can't target the root agent".to_string(),
+                            ));
+                        }
                     }
                     let receiver_path = receiver.agent_path.clone().ok_or_else(|| {
                         CodexErr::UnsupportedOperation(

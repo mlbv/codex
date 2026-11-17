@@ -12,7 +12,20 @@
 
 The GitHub Release also contains a [DotSlash](https://dotslash-cli.com/) file for the Codex CLI named `codex`. Using a DotSlash file makes it possible to make a lightweight commit to source control to ensure all contributors use the same version of an executable, regardless of what platform they use for development.
 
-### Build from source
+### Fork products
+
+The fork builds two Windows products from the same commit, directly based on a published upstream release. `master` mirrors upstream `main`; each `patch/<version>` branch contains one combined patch commit directly above the corresponding `rust-v<version>` tag. The active patch branch is the repository default. Compilation and tests run on GitHub-hosted runners in `mlbv/codex`. The package workflows accept a published release tag; an empty dispatch input selects the latest stable release. A branch push selects the release matching the workspace version. Both reject a source revision that is not directly based on that release.
+
+- `daemon-package.yml` produces `codex-<version>-windows-daemon`, including the CLI, app-server, execution server, code-mode host and Windows sandbox helpers. The four [Claude Code integration switches](claude-code.md) are available and default to false.
+- `messages-api-package.yml` produces `codex-messages-api-<version>-windows`, containing the CLI executable with the `messages-api` command. Native Claude Code integrations are excluded from this build.
+
+The products use the upstream release profile with `CARGO_PROFILE_RELEASE_LTO=off`. Each package retains the upstream version. Cargo graphs and compiler events are audited for feature isolation. The daemon's full source diff is retained for review; upstream model catalogs and prompts must match the selected release. Before upload, the daemon package is compared with the official binary through the built-in OpenAI provider using fixture ChatGPT credentials, the unmodified official catalog, HTTP and WebSocket requests, and thread continuation after restart.
+
+Run the corresponding package workflow for an installable artifact. The native and API CI workflows also exercise their separate feature sets on Linux and Windows. Package builds and validation evidence are uploaded independently. Building a package does not install it.
+
+### Upstream source development
+
+The following commands describe upstream source development. Use the hosted workflows above for this fork.
 
 ```bash
 # Clone the repository and navigate to the root of the Cargo workspace.

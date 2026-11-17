@@ -7,6 +7,7 @@ mod timers;
 mod value;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use std::sync::Arc;
@@ -52,7 +53,9 @@ pub(crate) enum RuntimeControlCommand {
 #[derive(Debug)]
 pub(crate) enum RuntimeEvent {
     Started,
-    Pending,
+    Pending {
+        tool_call_ids: HashSet<String>,
+    },
     ContentItem(OutputItem),
     YieldRequested,
     ToolCall {
@@ -245,7 +248,7 @@ fn run_runtime(
 
     let mut pending_promise = pending_promise;
     while let Some(command) =
-        next_runtime_command(&event_tx, &command_rx, &control_rx, pending_mode)
+        next_runtime_command(scope, &event_tx, &command_rx, &control_rx, pending_mode)
     {
         match command {
             RuntimeCommand::Terminate => break,
@@ -293,6 +296,7 @@ fn run_runtime(
 }
 
 fn next_runtime_command(
+    scope: &mut v8::PinScope<'_, '_>,
     event_tx: &RuntimeEventSender,
     command_rx: &std_mpsc::Receiver<RuntimeCommand>,
     control_rx: &std_mpsc::Receiver<RuntimeControlCommand>,
@@ -305,7 +309,14 @@ fn next_runtime_command(
             Err(std_mpsc::TryRecvError::Empty) => {}
         }
 
-        let _ = event_tx.blocking_send(RuntimeEvent::Pending);
+        let tool_call_ids = scope
+            .get_slot::<RuntimeState>()
+            .unwrap()
+            .pending_tool_calls
+            .keys()
+            .cloned()
+            .collect();
+        let _ = event_tx.blocking_send(RuntimeEvent::Pending { tool_call_ids });
         match pending_mode {
             #[cfg(test)]
             PendingRuntimeMode::Continue => return command_rx.recv().ok(),
@@ -514,7 +525,7 @@ await new Promise(() => {});
                 .await
                 .unwrap()
                 .unwrap(),
-            RuntimeEvent::Pending
+            RuntimeEvent::Pending { .. }
         ));
 
         runtime_tx
@@ -543,7 +554,7 @@ await new Promise(() => {});
                 .await
                 .unwrap()
                 .unwrap(),
-            RuntimeEvent::Pending
+            RuntimeEvent::Pending { .. }
         ));
 
         runtime_control_tx
@@ -575,7 +586,7 @@ setTimeout(() => text("late"), 3_600_000);
                 .await
                 .unwrap()
             {
-                Some(RuntimeEvent::Pending) => break,
+                Some(RuntimeEvent::Pending { .. }) => break,
                 Some(_) => {}
                 None => panic!("runtime closed before the timer was pending"),
             }

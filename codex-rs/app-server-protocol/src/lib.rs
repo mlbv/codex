@@ -64,7 +64,7 @@ pub(crate) use ts_rs::TS;
 #[path = "lib_tests.rs"]
 mod tests;
 // Release tooling selects this module's schema writer by its exact test name.
-#[cfg(test)]
+#[cfg(all(test, not(feature = "messages-api")))]
 mod schema_fixtures_tests;
 #[cfg(test)]
 use tests::export;

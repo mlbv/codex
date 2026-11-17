@@ -4,6 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+claude-code = ["codex-core/claude-code"]
+messages-api = [
+    "codex-app-server-protocol/messages-api",
+    "codex-core/messages-api",
+    "codex-guardian-v2/messages-api",
+    "codex-image-generation-extension/messages-api",
+    "codex-memories-write/messages-api",
+    "codex-otel/messages-api",
+    "codex-protocol/messages-api",
+    "codex-rollout/messages-api",
+    "codex-thread-store/messages-api",
+    "codex-tools/messages-api",
+]
+
 [[bin]]
 name = "codex-app-server"
 path = "src/main.rs"

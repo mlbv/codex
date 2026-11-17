@@ -826,6 +826,10 @@ fn truncate_message_text_to_token_budget(
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
                 truncated_content.push(content_item);
             }
+            #[cfg(feature = "messages-api")]
+            ContentItem::InputFile { .. } => {
+                truncated_content.push(content_item);
+            }
         }
     }
 

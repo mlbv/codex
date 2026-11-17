@@ -215,7 +215,6 @@ async fn run_cell<H: CellHost>(
                 yield_timer = observer.as_ref().and_then(observer_timer);
                 if runtime_paused && matches!(mode, ObserveMode::YieldAfter(_)) {
                     pending_frontier_ready = false;
-                    pending_tool_call_ids.clear();
                 }
                 resume_for_observation(
                     mode,
@@ -323,13 +322,15 @@ async fn run_cell<H: CellHost>(
                 };
                 match event {
                     // Keep the observer attached until termination has drained the output.
-                    RuntimeEvent::Started | RuntimeEvent::Pending | RuntimeEvent::YieldRequested
+                    RuntimeEvent::Started | RuntimeEvent::Pending { .. } | RuntimeEvent::YieldRequested
                         if termination => {}
                     RuntimeEvent::Started => {
                         yield_timer = observer.as_ref().and_then(observer_timer);
                     }
-                    RuntimeEvent::Pending => {
+                    RuntimeEvent::Pending { tool_call_ids } => {
                         runtime_paused = true;
+                        // Timed observations can consume results before the next frontier.
+                        pending_tool_call_ids.retain(|id| tool_call_ids.contains(id));
                         if let Some(observer) = observer.take_if(|observer| {
                             matches!(observer.observation.mode, ObserveMode::PendingFrontier)
                         }) {
@@ -338,7 +339,6 @@ async fn run_cell<H: CellHost>(
                             pending_frontier_ready =
                                 !send_pending(&mut output, observer.response_tx, &mut pending_tool_call_ids);
                         } else {
-                            pending_tool_call_ids.clear();
                             let _ = runtime_control_tx.send(RuntimeControlCommand::Continue);
                             runtime_paused = false;
                         }

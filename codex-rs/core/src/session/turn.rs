@@ -1875,6 +1875,7 @@ pub(crate) fn build_prompt(
         ),
         prompt_cache_ttl: turn_context.prompt_cache_ttl,
         cyber_access_program: turn_context.cyber_access_program,
+        controls: Default::default(),
     }
 }
 
@@ -2980,7 +2981,8 @@ async fn try_run_sampling_request(
     let mut pending_assessment: Option<codex_api::GuardianAssessment> = None;
     let mut response_completed = false;
     let mut request_token_usage: Option<codex_protocol::protocol::TokenUsage> = None;
-    let mut includes_reasoning = step_context.settings.model_info.use_responses_lite;
+    // Absent coverage metadata must not add an unproven reasoning supplement.
+    let mut includes_reasoning = true;
     // Catalog policies can enable adaptive review independently of the legacy scorer flag.
     // Capture evidence whenever Guardian is available; the reviewer resolves the policy.
     let assessment_authorization = if turn_context
@@ -3656,6 +3658,12 @@ async fn try_run_sampling_request(
                 if let Some(event) = consumer.consume_diff(turn_context.as_ref(), call_id, &delta) {
                     sess.send_event(&turn_context, event).await;
                 }
+            }
+            ResponseEvent::FunctionCallArgumentsDelta { .. } => {}
+            ResponseEvent::Incomplete { reason, .. } => {
+                break Err(CodexErr::Stream(format!(
+                    "Incomplete response returned, reason: {reason}"
+                )));
             }
             ResponseEvent::ReasoningSummaryDelta {
                 delta,
