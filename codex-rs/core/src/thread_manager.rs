@@ -3028,7 +3028,7 @@ impl ThreadManagerState {
             }
         };
         if matches!(ready_notification, ThreadReadyNotification::Emit) {
-            new_thread.thread.emit_thread_ready_lifecycle().await;
+            new_thread.thread.emit_thread_ready_lifecycle().await?;
         }
         for reason in std::mem::take(
             &mut *startup_invalidations

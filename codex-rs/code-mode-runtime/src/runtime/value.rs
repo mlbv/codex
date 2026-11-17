@@ -72,6 +72,9 @@ fn mcp_output_item(block: &JsonValue) -> Result<OutputItem, String> {
             image: ImageReference::File { .. },
             ..
         } => Err("content expects inline MCP image data".to_string()),
+        FunctionCallOutputContentItem::InputFile { .. } => {
+            unreachable!("MCP content projection must not introduce file references")
+        }
     }
 }
 

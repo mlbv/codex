@@ -1,4 +1,5 @@
 pub use codex_api::ResponseEvent;
+pub use codex_api::ToolChoice;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::models::BaseInstructions;
@@ -44,6 +45,22 @@ pub struct Prompt {
     pub(crate) prompt_cache_ttl: Option<crate::PromptCacheTtl>,
 
     pub(crate) cyber_access_program: Option<codex_protocol::turn_input::CyberAccessProgram>,
+
+    #[serde(skip_serializing_if = "ResponseControls::is_default")]
+    pub(crate) controls: ResponseControls,
+}
+
+/// Request controls Codex turns leave at their defaults: `auto` tool choice, no output cap.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct ResponseControls {
+    pub tool_choice: ToolChoice,
+    pub max_output_tokens: Option<u64>,
+}
+
+impl ResponseControls {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl Default for Prompt {
@@ -57,11 +74,38 @@ impl Default for Prompt {
             output_schema_strict: true,
             prompt_cache_ttl: None,
             cyber_access_program: None,
+            controls: ResponseControls::default(),
         }
     }
 }
 
 impl Prompt {
+    /// A turn prompt as a Codex turn builds it, for harnesses outside a Codex session.
+    pub fn new(
+        input: Vec<ResponseItem>,
+        tools: Vec<ToolSpec>,
+        base_instructions: BaseInstructions,
+        output_schema: Option<Value>,
+        parallel_tool_calls: bool,
+    ) -> Self {
+        Self {
+            input,
+            tools: tools.into(),
+            parallel_tool_calls,
+            base_instructions,
+            output_schema,
+            output_schema_strict: true,
+            prompt_cache_ttl: None,
+            cyber_access_program: None,
+            controls: ResponseControls::default(),
+        }
+    }
+
+    pub fn with_controls(mut self, controls: ResponseControls) -> Self {
+        self.controls = controls;
+        self
+    }
+
     pub(crate) fn get_formatted_input_for_request(
         &self,
         model_info: &ModelInfo,

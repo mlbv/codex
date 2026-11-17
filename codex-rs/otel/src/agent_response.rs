@@ -79,6 +79,7 @@ impl AgentResponseLogger {
                 ContentItem::InputText { .. }
                 | ContentItem::InputImage { .. }
                 | ContentItem::InputAudio { .. } => None,
+                ContentItem::InputFile { .. } => None,
             })
             .collect::<String>();
         // Keep plan content, stripping memory citations only from the exported copy.

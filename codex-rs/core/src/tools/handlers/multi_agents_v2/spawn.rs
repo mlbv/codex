@@ -108,13 +108,28 @@ async fn handle_spawn_agent(
         payload,
         call_id,
         source,
+        #[cfg(feature = "claude-code")]
+        cancellation_token,
         ..
     } = invocation;
     let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
     let fork_mode = args.fork_mode()?;
+    #[cfg(feature = "claude-code")]
+    let delegation = crate::claude_code::delegation::prepare_native_spawn(
+        &session,
+        &turn.session_source,
+        args.name,
+        args.run_in_background,
+    )
+    .await?;
     let message = message_content(args.message)?;
+    #[cfg(feature = "claude-code")]
+    let message = match &delegation {
+        Some(delegation) => delegation.decorate_prompt(message),
+        None => message,
+    };
     let role_name = args
         .agent_type
         .as_deref()
@@ -181,6 +196,24 @@ async fn handle_spawn_agent(
     let task_name = String::from(new_agent_path);
 
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
+    #[cfg(feature = "claude-code")]
+    if let Some(delegation) = delegation {
+        let output = SpawnAgentResult::Delegated {
+            agent_id: new_thread_id.to_string(),
+            task_name: task_name.clone(),
+            nickname: if hide_agent_metadata { None } else { nickname },
+            delegation: delegation
+                .finish(
+                    session,
+                    cancellation_token,
+                    new_thread_id,
+                    task_name,
+                    MultiAgentVersion::V2,
+                )
+                .await?,
+        };
+        return Ok((output, new_thread_id, agent_status, agent_snapshot));
+    }
     let output = if hide_agent_metadata {
         SpawnAgentResult::HiddenMetadata { task_name }
     } else {
@@ -208,6 +241,10 @@ struct SpawnAgentArgs {
     reasoning_effort: Option<ReasoningEffort>,
     fork_turns: Option<String>,
     fork_context: Option<bool>,
+    #[cfg(feature = "claude-code")]
+    name: Option<String>,
+    #[cfg(feature = "claude-code")]
+    run_in_background: Option<bool>,
 }
 
 impl SpawnAgentArgs {
@@ -242,6 +279,14 @@ impl SpawnAgentArgs {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum SpawnAgentResult {
+    #[cfg(feature = "claude-code")]
+    Delegated {
+        agent_id: String,
+        task_name: String,
+        nickname: Option<String>,
+        #[serde(flatten)]
+        delegation: crate::claude_code::delegation::NativeSpawnResult,
+    },
     WithNickname {
         task_name: String,
         nickname: Option<String>,

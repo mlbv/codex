@@ -906,6 +906,9 @@ fn truncate_message_text_to_token_budget(
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
                 truncated_content.push(content_item);
             }
+            ContentItem::InputFile { .. } => {
+                truncated_content.push(content_item);
+            }
         }
     }
 

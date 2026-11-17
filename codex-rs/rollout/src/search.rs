@@ -376,6 +376,7 @@ fn content_item_text(item: &ContentItem) -> Option<&str> {
             Some(text.as_str())
         }
         ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
+        ContentItem::InputFile { .. } => None,
     }
 }
 

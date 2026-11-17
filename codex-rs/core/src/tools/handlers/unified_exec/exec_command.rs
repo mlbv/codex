@@ -53,8 +53,11 @@ pub(crate) struct ExecCommandHandlerOptions {
     pub(crate) include_environment_id: bool,
     pub(crate) include_windows_shell_guidance: bool,
     pub(crate) has_powershell: bool,
+    #[cfg(feature = "claude-code")]
+    pub(crate) background_tasks_enabled: bool,
 }
 
+#[derive(Clone, Copy)]
 pub struct ExecCommandHandler {
     options: ExecCommandHandlerOptions,
     lifetime: ExecCommandLifetime,
@@ -110,6 +113,12 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
                 .get_or_insert_default()
                 .remove("tty");
         }
+        #[cfg(feature = "claude-code")]
+        if self.options.background_tasks_enabled
+            && matches!(self.lifetime, ExecCommandLifetime::Interactive)
+        {
+            crate::claude_code::tasks::extend_exec_spec(&mut spec);
+        }
         spec
     }
 
@@ -121,12 +130,18 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
     where
         ToolInvocation: 'a,
     {
-        Box::pin(self.handle_call(invocation))
+        #[cfg(feature = "claude-code")]
+        if self.options.background_tasks_enabled
+            && matches!(self.lifetime, ExecCommandLifetime::Interactive)
+        {
+            return Box::pin(crate::claude_code::tasks::exec_command(*self, invocation));
+        }
+        Box::pin(self.handle_untracked(invocation))
     }
 }
 
 impl ExecCommandHandler {
-    async fn handle_call(
+    pub(crate) async fn handle_untracked(
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {

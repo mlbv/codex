@@ -35,17 +35,18 @@ async fn http_policy_capacity_preserves_retry_advice_and_terminal_behavior() {
                 retry_after: advice,
             }));
             assert_eq!(
-                (
-                    error.to_codex_protocol_error(),
-                    error.retry_after(),
-                    error.retry_delay(/*retry_count*/ 1)
-                ),
-                (
-                    expected.clone(),
-                    advice,
-                    advice.map(|_| Duration::from_secs(3))
-                )
+                (error.to_codex_protocol_error(), error.retry_after()),
+                (expected.clone(), advice)
             );
+            let delay = error.retry_delay(/*retry_count*/ 1);
+            match advice {
+                Some(_) => assert_eq!(delay, Some(Duration::from_secs(3))),
+                // Overload backs off without advice; policy capacity stays terminal.
+                None => assert_eq!(
+                    delay.is_some(),
+                    expected == CodexErrorInfo::ServerOverloaded
+                ),
+            }
         }
     }
 }
@@ -172,7 +173,7 @@ fn map_http_error_classifies_provider_codes() {
             503,
             "server_is_overloaded",
             CodexErrorInfo::ServerOverloaded,
-            false,
+            true,
         ),
         (503, "slow_down", CodexErrorInfo::RateLimitExceeded, true),
         (

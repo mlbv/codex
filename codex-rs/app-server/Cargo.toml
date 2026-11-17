@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+claude-code = ["codex-core/claude-code"]
+messages-api = ["codex-core/messages-api"]
+
 [[bin]]
 name = "codex-app-server"
 path = "src/main.rs"

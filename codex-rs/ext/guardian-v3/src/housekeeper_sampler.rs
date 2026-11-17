@@ -211,7 +211,7 @@ impl HousekeeperSampler {
             model: self.model.slug.clone(),
             input,
             tools: None,
-            tool_choice: "none".to_owned(),
+            tool_choice: codex_api::ToolChoice::None,
             parallel_tool_calls: false,
             reasoning: Some(Reasoning {
                 effort: Some(ReasoningEffort::Low),
@@ -221,6 +221,7 @@ impl HousekeeperSampler {
                     .use_responses_lite
                     .then_some(ReasoningContext::AllTurns),
             }),
+            max_output_tokens: None,
             store: false,
             stream: true,
             stream_options: None,

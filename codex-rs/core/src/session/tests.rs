@@ -3151,9 +3151,150 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
 }
 
 #[tokio::test]
+async fn token_usage_reasoning_coverage_included_does_not_trigger_auto_compaction() {
+    let (session, turn_context, _events) = make_session_and_context_with_auth_and_config_and_rx(
+        codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        Vec::new(),
+        |config| {
+            config.model = Some("gpt-5.2".to_string());
+            config.model_context_window = Some(1_000);
+            config.model_auto_compact_token_limit = Some(800);
+        },
+    )
+    .await;
+    let reasoning = serde_json::from_value(serde_json::json!({
+        "type": "reasoning",
+        "summary": [],
+        "encrypted_content": "a".repeat(4_000),
+    }))
+    .unwrap();
+    session
+        .replace_history(
+            vec![
+                user_message("first"),
+                reasoning,
+                assistant_message("first answer"),
+            ],
+            /*reference_context_item*/ None,
+        )
+        .await;
+    session
+        .update_token_usage_info(
+            &turn_context,
+            TokenUsage {
+                total_tokens: 590,
+                ..Default::default()
+            }
+            .into(),
+            /*includes_reasoning*/ true,
+        )
+        .await
+        .unwrap();
+
+    // A new turn retains the completed response's reasoning coverage.
+    session
+        .record_conversation_items(
+            &turn_context,
+            turn_context.model_info(),
+            &[user_message("second")],
+        )
+        .await;
+
+    let status = super::context_window::context_window_token_status(&session, &turn_context).await;
+    assert!(status.active_context_tokens >= 590);
+    assert!(!status.token_limit_reached);
+    assert!(!status.full_context_window_limit_reached);
+
+    session
+        .record_conversation_items(
+            &turn_context,
+            turn_context.model_info(),
+            &[assistant_message("second answer")],
+        )
+        .await;
+
+    // Fresh server usage controls compaction without counting retained reasoning twice.
+    for (total_tokens, token_limit_reached) in [(600, false), (810, true)] {
+        session
+            .update_token_usage_info(
+                &turn_context,
+                TokenUsage {
+                    total_tokens,
+                    ..Default::default()
+                }
+                .into(),
+                /*includes_reasoning*/ true,
+            )
+            .await
+            .unwrap();
+
+        let status =
+            super::context_window::context_window_token_status(&session, &turn_context).await;
+        assert_eq!(status.active_context_tokens, total_tokens);
+        assert_eq!(status.auto_compact_scope_limit, Some(800));
+        assert_eq!(status.token_limit_reached, token_limit_reached);
+        assert!(!status.full_context_window_limit_reached);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resampled_response_keeps_reasoning_coverage_without_server_metadata() -> anyhow::Result<()>
+{
+    let server = start_mock_server().await;
+    let requests = responses::mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("denied", r#"{"outcome":"deny"}"#),
+                responses::ev_completed_with_tokens("denied", /*total_tokens*/ 100),
+            ]),
+            sse(vec![
+                ev_assistant_message("allowed", r#"{"outcome":"allow"}"#),
+                responses::ev_completed_with_tokens("allowed", /*total_tokens*/ 200),
+            ]),
+        ],
+    )
+    .await;
+    let test = test_codex().build(&server).await?;
+    test.codex
+        .thread_extension_data()
+        .insert(codex_guardian_reviewer::DenialResample::default());
+
+    test.codex
+        .start_or_steer_turn(ExternalTurnInputRequest::user_input(vec![
+            UserInput::Text {
+                text: "review".into(),
+                text_elements: Vec::new(),
+            },
+        ]))
+        .await?;
+    let EventMsg::TokenCount(TokenCountEvent {
+        info: Some(info), ..
+    }) = wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::TokenCount(TokenCountEvent { info: Some(info), .. })
+                if info.last_token_usage.total_tokens == 200
+        )
+    })
+    .await
+    else {
+        unreachable!();
+    };
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert_eq!(requests.requests().len(), 2);
+    assert_eq!(info.last_usage_includes_reasoning, Some(true));
+    Ok(())
+}
+
+#[tokio::test]
 async fn record_initial_history_seeds_token_info_from_rollout() {
     let (session, turn_context) = make_session_and_context().await;
-    let (mut rollout_items, _expected) = sample_rollout(&session, &turn_context).await;
+    let (mut rollout_items, expected_history) = sample_rollout(&session, &turn_context).await;
 
     let info1 = TokenUsageInfo {
         total_token_usage: TokenUsage {
@@ -3202,24 +3343,31 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
 
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
+            accounting: None,
             info: Some(info1),
             rate_limits: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
+            accounting: None,
             info: None,
             rate_limits: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
+            accounting: Some(codex_protocol::protocol::TokenUsageAccounting {
+                non_last_reasoning_tokens: 13,
+                server_reported_usage_item_count: Some(expected_history.len()),
+            }),
             info: Some(info2.clone()),
             rate_limits: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
+            accounting: None,
             info: None,
             rate_limits: None,
         },
@@ -3236,6 +3384,77 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
 
     let actual = session.state.lock().await.token_info();
     assert_eq!(actual, Some(info2));
+    assert_eq!(session.get_total_token_usage().await, 48);
+}
+
+#[tokio::test]
+async fn record_initial_history_seeds_token_info_from_rollout_without_legacy_boundary() {
+    for fork in [false, true] {
+        let (session, turn_context, _events) =
+            make_session_and_context_with_auth_and_config_and_rx(
+                codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+                Vec::new(),
+                |config| {
+                    config.model = Some("gpt-5.2".to_string());
+                    config.model_context_window = Some(1_000);
+                    config.model_auto_compact_token_limit = Some(800);
+                },
+            )
+            .await;
+        let reasoning: ResponseItem = serde_json::from_value(serde_json::json!({
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "a".repeat(4_000),
+        }))
+        .unwrap();
+        let mut rollout_items = vec![
+            RolloutItem::ResponseItem(user_message("first").into()),
+            RolloutItem::ResponseItem(reasoning.into()),
+            RolloutItem::ResponseItem(assistant_message("first answer").into()),
+        ];
+        let usage = TokenUsage {
+            total_tokens: 590,
+            ..Default::default()
+        };
+        let info = TokenUsageInfo {
+            total_token_usage: usage.clone(),
+            last_token_usage: usage,
+            last_usage_includes_reasoning: Some(true),
+            model_context_window: Some(1_000),
+        };
+        // The old zero baseline meant coverage through the latest model output.
+        let token_count = serde_json::from_value(serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": info,
+                "rate_limits": null,
+            },
+            "accounting": {
+                "confirmed_excluded_reasoning_tokens": 0,
+                "history_baseline_len": 0,
+            },
+        }))
+        .unwrap();
+        rollout_items.push(token_count);
+        let initial_history = if fork {
+            InitialHistory::Forked(rollout_items)
+        } else {
+            InitialHistory::Resumed(ResumedHistory {
+                history_revision: None,
+                conversation_id: ThreadId::default(),
+                history: Arc::new(rollout_items),
+                rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
+            })
+        };
+        session.record_initial_history(initial_history).await;
+
+        let status =
+            super::context_window::context_window_token_status(&session, &turn_context).await;
+        assert_eq!(status.active_context_tokens, 590);
+        assert_eq!(status.auto_compact_scope_limit, Some(800));
+        assert!(!status.token_limit_reached);
+    }
 }
 
 #[test]
@@ -3327,6 +3546,20 @@ async fn recompute_token_usage_uses_session_base_instructions() {
         .last_token_usage
         .total_tokens;
     assert_eq!(actual_tokens, expected_tokens.max(0));
+
+    let tail = user_message(&"added after the estimate ".repeat(100));
+    session
+        .record_conversation_items(
+            &turn_context,
+            turn_context.model_info(),
+            std::slice::from_ref(&tail),
+        )
+        .await;
+    let history = session.clone_history().await;
+    let expected_with_tail = history
+        .estimate_token_count_with_base_instructions(&session_base_instructions)
+        .expect("estimate with new tail");
+    assert_eq!(session.get_total_token_usage().await, expected_with_tail);
 }
 
 #[tokio::test]

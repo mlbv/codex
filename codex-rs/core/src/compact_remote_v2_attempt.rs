@@ -196,6 +196,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         output_schema_strict: true,
         prompt_cache_ttl: turn_context.prompt_cache_ttl,
         cyber_access_program: turn_context.cyber_access_program,
+        controls: Default::default(),
     });
 
     let mut responses_metadata = match captured_window {

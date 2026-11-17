@@ -382,6 +382,9 @@ impl SectionCost {
             ContentItem::InputAudio {
                 audio: AudioReference::File { .. },
             } => {}
+            ContentItem::InputFile { file } => {
+                self.text_bytes = self.text_bytes.saturating_add(file.payload_len());
+            }
         }
         self
     }

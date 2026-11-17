@@ -23,6 +23,7 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
                 ResponseItem::Message { content, .. } => {
                     content.retain(|item| match item {
                         ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+                        ContentItem::InputFile { .. } => false,
                         ContentItem::InputText { .. } | ContentItem::OutputText { .. } => true,
                     });
                 }
@@ -32,6 +33,7 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
                         items.retain(|item| match item {
                             FunctionCallOutputContentItem::InputImage { .. }
                             | FunctionCallOutputContentItem::InputAudio { .. } => false,
+                            FunctionCallOutputContentItem::InputFile { .. } => false,
                             FunctionCallOutputContentItem::InputText { .. }
                             | FunctionCallOutputContentItem::EncryptedContent { .. } => true,
                         });
@@ -173,6 +175,7 @@ fn without_thread_item_media(mut item: ThreadItemPayload) -> ThreadItemPayload {
             items.retain(|item| match item {
                 FunctionCallOutputContentItem::InputImage { .. }
                 | FunctionCallOutputContentItem::InputAudio { .. } => false,
+                FunctionCallOutputContentItem::InputFile { .. } => false,
                 FunctionCallOutputContentItem::InputText { .. }
                 | FunctionCallOutputContentItem::EncryptedContent { .. } => true,
             });

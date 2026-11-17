@@ -636,6 +636,7 @@ pub(crate) fn legacy_notify_input_messages(input: &[ResponseItem]) -> Vec<String
                         ContentItem::InputImage { .. }
                         | ContentItem::InputAudio { .. }
                         | ContentItem::OutputText { .. } => None,
+                        ContentItem::InputFile { .. } => None,
                     })
                     .collect(),
             )
@@ -1195,6 +1196,9 @@ mod tests {
                                 ContentItem::InputImage { .. }
                                 | ContentItem::InputAudio { .. }
                                 | ContentItem::OutputText { .. } => {
+                                    panic!("expected input text content, got {item:?}")
+                                }
+                                ContentItem::InputFile { .. } => {
                                     panic!("expected input text content, got {item:?}")
                                 }
                             })

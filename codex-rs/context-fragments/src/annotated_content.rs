@@ -29,6 +29,7 @@ pub fn truncate_annotated_text(
                 Some(text.as_str())
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
+            ContentItem::InputFile { .. } => None,
         })
         .collect();
     let Some(truncation) = plan_token_truncation(&text, max_tokens) else {
@@ -45,6 +46,10 @@ pub fn truncate_annotated_text(
         let length = match part.content() {
             ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => text.len(),
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
+                result.push(part);
+                continue;
+            }
+            ContentItem::InputFile { .. } => {
                 result.push(part);
                 continue;
             }
@@ -131,6 +136,9 @@ impl AnnotatedContent {
                 logprobs: None,
             },
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
+                unreachable!("only text parts have byte ranges")
+            }
+            ContentItem::InputFile { .. } => {
                 unreachable!("only text parts have byte ranges")
             }
         };

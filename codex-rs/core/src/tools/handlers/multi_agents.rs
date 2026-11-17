@@ -42,6 +42,18 @@ pub(crate) fn parse_agent_id_target(target: &str) -> Result<ThreadId, FunctionCa
     })
 }
 
+pub(crate) async fn resolve_agent_id_target(
+    _session: &std::sync::Arc<crate::session::session::Session>,
+    _turn: &std::sync::Arc<crate::session::turn_context::TurnContext>,
+    target: &str,
+) -> Result<ThreadId, FunctionCallError> {
+    #[cfg(feature = "claude-code")]
+    if _session.enabled(codex_features::Feature::ClaudeDelegation) {
+        return crate::agent::agent_resolver::resolve_agent_target(_session, _turn, target).await;
+    }
+    parse_agent_id_target(target)
+}
+
 pub(crate) fn parse_agent_id_targets(
     targets: Vec<String>,
 ) -> Result<Vec<ThreadId>, FunctionCallError> {

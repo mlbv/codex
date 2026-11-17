@@ -1,5 +1,6 @@
 use super::responses_error::parse_failed_response;
 use crate::common::ReasoningRemovalReason;
+use crate::common::RemovedReasoning;
 use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::common::SafetyBuffering;
@@ -244,10 +245,36 @@ impl ResponsesStreamEvent {
                 .map(ResponseEvent::TurnModerationMetadata),
             safety_buffering.map(ResponseEvent::SafetyBuffering),
             guardian.map(ResponseEvent::GuardianAssessment),
+            self.removed_reasoning()
+                .map(ResponseEvent::ReasoningRemoved),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    fn removed_reasoning(&self) -> Option<Vec<RemovedReasoning>> {
+        if !matches!(self.kind(), "response.completed" | "response.incomplete") {
+            return None;
+        }
+        let field =
+            |entry: &Value, name: &str| entry.get(name).and_then(Value::as_str).map(str::to_string);
+        let removed = self
+            .response
+            .as_ref()?
+            .get("input_transformations")?
+            .as_array()?
+            .iter()
+            .filter(|entry| {
+                entry.get("type").and_then(Value::as_str) == Some("reasoning")
+                    && entry.get("action").and_then(Value::as_str) == Some("removed")
+            })
+            .map(|entry| RemovedReasoning {
+                id: field(entry, "id"),
+                reason: field(entry, "reason"),
+            })
+            .collect::<Vec<_>>();
+        (!removed.is_empty()).then_some(removed)
     }
 
     pub(crate) fn model_verifications(&self) -> Option<Vec<ModelVerification>> {
@@ -432,6 +459,15 @@ pub fn process_responses_event(
                 }));
             }
         }
+        #[cfg(feature = "messages-api")]
+        "response.function_call_arguments.delta" => {
+            if let (Some(delta), Some(item_id)) = (event.delta, event.item_id) {
+                return Ok(Some(ResponseEvent::FunctionCallArgumentsDelta {
+                    item_id,
+                    delta,
+                }));
+            }
+        }
         "response.reasoning_summary_text.delta" => {
             if let (Some(delta), Some(summary_index)) = (event.delta, event.summary_index) {
                 return Ok(Some(ResponseEvent::ReasoningSummaryDelta {
@@ -481,8 +517,9 @@ pub fn process_responses_event(
                         .get("incomplete_details")
                         .and_then(|details| details.get("reason"))
                         .and_then(Value::as_str)
+                        .map(str::to_string)
                 });
-                let reason = reason.unwrap_or("unknown");
+                let reason = reason.unwrap_or_else(|| "unknown".to_string());
                 if reason == "content_filter" {
                     return Err(ResponsesEventError::Api(ApiError::ContentFilter));
                 }
@@ -566,7 +603,6 @@ pub fn process_responses_event(
         | "response.content_part.added"
         | "response.content_part.done"
         | "response.custom_tool_call_input.done"
-        | "response.function_call_arguments.delta"
         | "response.function_call_arguments.done"
         | "response.in_progress"
         | "response.metadata"
@@ -693,7 +729,10 @@ async fn process_sse_with_treatment(
 
         match process_responses_event(event) {
             Ok(Some(event)) => {
-                let is_completed = matches!(event, ResponseEvent::Completed { .. });
+                let is_completed = matches!(
+                    event,
+                    ResponseEvent::Completed { .. } | ResponseEvent::Incomplete { .. }
+                );
                 if tx_event.send(Ok(event)).await.is_err() {
                     return;
                 }
@@ -807,6 +846,36 @@ mod tests {
 
     fn idle_timeout() -> Duration {
         Duration::from_millis(1000)
+    }
+
+    #[tokio::test]
+    async fn removed_reasoning_precedes_the_terminal_event() {
+        let completed = |transformations: serde_json::Value| {
+            json!({
+                "type": "response.completed",
+                "response": {"id": "resp1", "input_transformations": transformations}
+            })
+        };
+        let events = run_sse(vec![completed(json!([
+            {"type": "reasoning", "action": "removed", "reason": "prefix_mismatch", "id": "rs_a"},
+            {"type": "reasoning", "action": "removed"},
+            {"type": "reasoning", "action": "kept", "id": "rs_b"},
+            {"type": "message", "action": "removed", "id": "msg_c"}
+        ]))])
+        .await;
+        assert_matches!(events.as_slice(), [
+            ResponseEvent::ReasoningRemoved(removed),
+            ResponseEvent::Completed { reasoning_removals: Some(counts), .. },
+        ] if removed == &vec![
+            RemovedReasoning { id: Some("rs_a".to_string()), reason: Some("prefix_mismatch".to_string()) },
+            RemovedReasoning { id: None, reason: None },
+        ] && counts.values().sum::<i64>() == 2);
+
+        let events = run_sse(vec![completed(json!([
+            {"type": "reasoning", "action": "kept", "id": "rs_b"}
+        ]))])
+        .await;
+        assert_matches!(events.as_slice(), [ResponseEvent::Completed { .. }]);
     }
 
     #[tokio::test]
@@ -1068,7 +1137,20 @@ mod tests {
                 delta,
             } if item_id == "ctc_1" && call_id == "call_1" && delta == "*** Begin"
         );
-        assert_matches!(&events[1], ResponseEvent::Completed { .. });
+        #[cfg(feature = "messages-api")]
+        {
+            assert_matches!(
+                &events[1],
+                ResponseEvent::FunctionCallArgumentsDelta { item_id, delta }
+                    if item_id == "fc_1" && delta == "{\"input\":\""
+            );
+            assert_matches!(&events[2], ResponseEvent::Completed { .. });
+        }
+        #[cfg(not(feature = "messages-api"))]
+        {
+            assert_eq!(events.len(), 2);
+            assert_matches!(&events[1], ResponseEvent::Completed { .. });
+        }
     }
 
     #[tokio::test]

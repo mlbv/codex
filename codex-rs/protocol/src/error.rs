@@ -517,11 +517,12 @@ impl CodexErr {
             | CodexErrorDetails::WorkspaceAccessDenied(_)
             | CodexErrorDetails::AccessProgramNotEnabled(_)
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => RetryPolicy::Never,
-            CodexErrorDetails::ServerOverloaded
-            | CodexErrorDetails::PolicyCapacityUnavailable
-            | CodexErrorDetails::RetryLimit(_) => RetryPolicy::ServerDirected,
+            CodexErrorDetails::PolicyCapacityUnavailable | CodexErrorDetails::RetryLimit(_) => {
+                RetryPolicy::ServerDirected
+            }
             CodexErrorDetails::WebsocketMessageTooLarge => RetryPolicy::FallBackToHttp,
-            CodexErrorDetails::Stream(..)
+            CodexErrorDetails::ServerOverloaded
+            | CodexErrorDetails::Stream(..)
             | CodexErrorDetails::ContentFilter
             | CodexErrorDetails::RateLimitExceeded(_)
             | CodexErrorDetails::Timeout

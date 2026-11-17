@@ -42,9 +42,7 @@ async fn handle_resume_agent(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: ResumeAgentArgs = parse_arguments(&arguments)?;
-    let receiver_thread_id = ThreadId::from_string(&args.id).map_err(|err| {
-        FunctionCallError::RespondToModel(format!("invalid agent id {}: {err:?}", args.id))
-    })?;
+    let receiver_thread_id = resolve_agent_id_target(&session, &turn, &args.id).await?;
     let local_agent_control = session
         .services
         .local_agent_runtime
@@ -130,6 +128,8 @@ async fn handle_resume_agent(
     if let Some(err) = error {
         return Err(err);
     }
+    #[cfg(feature = "claude-code")]
+    crate::claude_code::delegation::native_followup(&session, receiver_thread_id).await?;
     turn.session_telemetry
         .counter("codex.multi_agent.resume", /*inc*/ 1, &[]);
 

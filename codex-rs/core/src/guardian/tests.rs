@@ -369,6 +369,7 @@ fn response_item_contains_message_text(item: &ResponseItem, needle: &str) -> boo
             text.contains(needle)
         }
         ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+        ContentItem::InputFile { .. } => false,
     })
 }
 
@@ -2602,10 +2603,11 @@ async fn guardian_review_retries_transient_session_failure_then_approves() -> an
     let request_log = mount_sse_sequence(
         &server,
         vec![
+            // Overload retries within the sampling stream; policy capacity reaches the review.
             sse_failed(
                 "resp-session-failure",
-                "server_is_overloaded",
-                "temporary reviewer overload",
+                "policy_capacity_unavailable",
+                "temporary reviewer capacity",
             ),
             sse(vec![
                 ev_response_created("resp-approved"),

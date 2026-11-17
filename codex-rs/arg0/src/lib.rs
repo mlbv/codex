@@ -18,6 +18,9 @@ use codex_windows_sandbox::CODEX_WINDOWS_SANDBOX_ARG1;
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 
+mod startup_env;
+use startup_env::initialize_environment;
+
 const APPLY_PATCH_ARG0: &str = "apply_patch";
 const MISSPELLED_APPLY_PATCH_ARG0: &str = "applypatch";
 const LOCK_FILENAME: &str = ".lock";
@@ -131,7 +134,11 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
 
     // This modifies the environment, which is not thread-safe, so do this
     // before creating any threads/the Tokio runtime.
-    load_dotenv();
+    // SAFETY: normal dispatch has not started the runtime or worker threads.
+    if let Err(error) = unsafe { initialize_environment() } {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
 
     let (path_entry_guard, updated_path_env_var) = prepare_path_env_var_with_aliases(
         InstallContext::current(),
@@ -177,7 +184,7 @@ fn prepare_path_env_var_with_aliases(
 /// `codex-linux-sandbox` we *directly* execute
 /// [`codex_linux_sandbox::run_main`] (which never returns). Otherwise we:
 ///
-/// 1.  Load `.env` values from `~/.codex/.env` before creating any threads.
+/// 1.  Load the user's `.env`, then `config.toml` environment overrides, before creating threads.
 /// 2.  Spawn a main runtime thread with a controlled stack size.
 /// 3.  Construct a Tokio multi-thread runtime.
 /// 4.  Capture the current executable path and derive the
@@ -196,10 +203,25 @@ where
     F: FnOnce(Arg0DispatchPaths) -> Fut + Send + 'static,
     Fut: Future<Output = anyhow::Result<()>>,
 {
+    arg0_dispatch_or_else_with_startup(|| Ok(()), move |paths, ()| main_fn(paths))
+}
+
+/// Runs startup initialization after helper dispatch and environment loading, before runtime threads.
+pub fn arg0_dispatch_or_else_with_startup<S, F, Fut>(
+    startup: impl FnOnce() -> anyhow::Result<S>,
+    main_fn: F,
+) -> anyhow::Result<()>
+where
+    S: Send + 'static,
+    F: FnOnce(Arg0DispatchPaths, S) -> Fut + Send + 'static,
+    Fut: Future<Output = anyhow::Result<()>>,
+{
     // Retain the TempDir so it exists for the lifetime of the invocation of
     // this executable. Admittedly, we could invoke `keep()` on it, but it
     // would be nice to avoid leaving temporary directories behind, if possible.
     let path_entry_guard = arg0_dispatch();
+    let startup = startup()?;
+    let main_fn = move |paths| main_fn(paths, startup);
     let current_exe = std::env::current_exe().ok();
 
     // Regular invocation. Run the async entry point on a thread with the same

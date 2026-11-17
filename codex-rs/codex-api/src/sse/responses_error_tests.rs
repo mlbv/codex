@@ -88,15 +88,19 @@ async fn policy_capacity_classification_preserves_overload_retry_behavior() {
             }))
             .unwrap();
             let error = map_api_error(process_responses_event(event).unwrap_err().into_api_error());
-            assert_eq!(
-                (
-                    error.to_codex_protocol_error(),
-                    error.retry_delay(/*retry_count*/ 1),
-                    error.to_string()
+            let delay = error.retry_delay(/*retry_count*/ 1);
+            match retry_after {
+                Some(_) => assert_eq!(delay, Some(Duration::from_secs(3))),
+                // Overload backs off without advice; policy capacity stays terminal.
+                None => assert_eq!(
+                    delay.is_some(),
+                    expected == CodexErrorInfo::ServerOverloaded
                 ),
+            }
+            assert_eq!(
+                (error.to_codex_protocol_error(), error.to_string()),
                 (
                     expected.clone(),
-                    retry_after.map(|_| Duration::from_secs(3)),
                     if expected == CodexErrorInfo::PolicyCapacityUnavailable {
                         "Policy-restricted capacity is unavailable. Please try again later."
                     } else {

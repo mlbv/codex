@@ -297,6 +297,7 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
                 | FunctionCallOutputContentItem::InputImage { .. }
                 | FunctionCallOutputContentItem::InputAudio { .. }
                 | FunctionCallOutputContentItem::EncryptedContent { .. } => None,
+                FunctionCallOutputContentItem::InputFile { .. } => None,
             })
             .collect::<Vec<_>>()
             .join("\n"),

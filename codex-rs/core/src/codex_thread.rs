@@ -481,7 +481,11 @@ impl CodexThread {
         );
     }
 
-    pub(crate) async fn emit_thread_ready_lifecycle(&self) {
+    pub(crate) async fn emit_thread_ready_lifecycle(self: &Arc<Self>) -> CodexResult<()> {
+        #[cfg(feature = "claude-code")]
+        crate::claude_code::initialize(self)
+            .await
+            .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
         let contributors = self
             .session
             .services
@@ -490,7 +494,7 @@ impl CodexThread {
         // Hook-free reviewers must reach their owner without suspending after registration.
         // Otherwise cancellation can strand the registered thread before cleanup is installed.
         if contributors.is_empty() {
-            return;
+            return Ok(());
         }
         let (config, history_initialization, history_mode) =
             self.session.thread_ready_config().await;
@@ -506,6 +510,7 @@ impl CodexThread {
                 })
                 .await;
         }
+        Ok(())
     }
 
     pub(crate) async fn emit_thread_resume_lifecycle(&self) {
@@ -661,6 +666,16 @@ impl CodexThread {
             },
         )
         .await
+    }
+
+    /// Admits a host-owned background observation without treating it as user authorization.
+    #[cfg(feature = "claude-code")]
+    pub(crate) async fn wake_if_idle(
+        &self,
+        request: TurnInputRequest,
+    ) -> CodexResult<TurnInputSubmission> {
+        self.submit_turn_input_with_mode(request, TurnInputMode::WakeIfIdle)
+            .await
     }
 
     /// Resumes an interrupted regular turn only when the thread is idle.

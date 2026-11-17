@@ -209,6 +209,7 @@ fn collect_transcript_for_review(
                         | ContentItem::OutputText { .. }
                         | ContentItem::InputImage { .. }
                         | ContentItem::InputAudio { .. } => None,
+                        ContentItem::InputFile { .. } => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");

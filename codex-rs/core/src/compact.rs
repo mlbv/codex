@@ -596,6 +596,7 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
                 }
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {}
+            ContentItem::InputFile { .. } => {}
         }
     }
     if pieces.is_empty() {
@@ -872,7 +873,8 @@ async fn drain_to_completed(
     phase: CompactionPhase,
 ) -> CodexResult<CompactionResponse> {
     let turn_context = step_context.turn.as_ref();
-    let mut includes_reasoning = turn_context.model_info().use_responses_lite;
+    // Absent coverage metadata must not add an unproven reasoning supplement.
+    let mut includes_reasoning = true;
     let cancellation = &step_context.turn_cancellation;
     let mut stream = request
         .open(
